@@ -11,6 +11,7 @@ import { daFold, txMessage } from '../../crypto/schnorr';
 interface BlobTx {
   from_pk_x: string;
   to_field: string;
+  asset: number;
   amount: string;
   nonce: number;
   is_withdraw: boolean;
@@ -45,7 +46,7 @@ export function DaVerifier() {
       // The verifier recipe from DESIGN.md, byte for byte.
       let acc = 0n;
       for (const t of txs) {
-        const msg = txMessage(hexToFr(t.from_pk_x), hexToFr(t.to_field), BigInt(t.amount), BigInt(t.nonce), t.is_withdraw);
+        const msg = txMessage(hexToFr(t.from_pk_x), hexToFr(t.to_field), BigInt(t.asset), BigInt(t.amount), BigInt(t.nonce), t.is_withdraw);
         acc = daFold(acc, msg);
       }
       const folded = frToHex32(acc);

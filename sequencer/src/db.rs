@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub type DbResult<T> = Result<T, rusqlite::Error>;
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub fn open(path: &std::path::Path) -> DbResult<Connection> {
     let conn = Connection::open(path)?;
@@ -25,6 +25,12 @@ fn migrate(conn: &Connection) -> DbResult<()> {
     if version >= SCHEMA_VERSION {
         return Ok(());
     }
+    // v1 (single-asset payments) state is not migratable: the leaf layout
+    // changed, so a v1 DB belongs to a different rollup instance anyway
+    // (new circuit == new VK == fresh contract). Refuse rather than corrupt.
+    if version != 0 {
+        panic!("sequencer DB schema v{version} is incompatible with v{SCHEMA_VERSION}; delete the DB and re-sync against the (new) contract");
+    }
     conn.execute_batch(
         r#"
         BEGIN;
@@ -35,7 +41,8 @@ fn migrate(conn: &Connection) -> DbResult<()> {
         CREATE TABLE IF NOT EXISTS leaves (
           idx     INTEGER PRIMARY KEY,
           pk_x    TEXT NOT NULL UNIQUE,
-          balance TEXT NOT NULL,
+          cash    TEXT NOT NULL,
+          coll    TEXT NOT NULL,
           nonce   INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS mempool (
@@ -44,6 +51,7 @@ fn migrate(conn: &Connection) -> DbResult<()> {
           from_pk_y     TEXT NOT NULL,
           to_field      TEXT NOT NULL,
           withdraw_dest TEXT,
+          asset         INTEGER NOT NULL,
           amount        TEXT NOT NULL,
           nonce         INTEGER NOT NULL,
           is_withdraw   INTEGER NOT NULL,
@@ -58,18 +66,21 @@ fn migrate(conn: &Connection) -> DbResult<()> {
           UNIQUE(from_pk_x, nonce)
         );
         CREATE TABLE IF NOT EXISTS deposits (
-          seq         INTEGER PRIMARY KEY,
+          asset       INTEGER NOT NULL,
+          seq         INTEGER NOT NULL,
           pk_x        TEXT NOT NULL,
           amount      TEXT NOT NULL,
           status      TEXT NOT NULL DEFAULT 'pending',
           batch_num   INTEGER,
-          observed_at INTEGER NOT NULL
+          observed_at INTEGER NOT NULL,
+          PRIMARY KEY (asset, seq)
         );
         CREATE TABLE IF NOT EXISTS batches (
           batch_num     INTEGER PRIMARY KEY,
           old_root      TEXT NOT NULL,
           new_root      TEXT NOT NULL,
-          deposit_count INTEGER NOT NULL,
+          deposit_count_cash INTEGER NOT NULL,
+          deposit_count_coll INTEGER NOT NULL,
           da_commitment TEXT NOT NULL,
           blob_json     TEXT NOT NULL,
           envelope_json TEXT NOT NULL,
@@ -85,12 +96,13 @@ fn migrate(conn: &Connection) -> DbResult<()> {
           batch_num INTEGER NOT NULL,
           kind TEXT NOT NULL,
           counterparty TEXT,
+          asset INTEGER NOT NULL DEFAULT 0,
           amount TEXT NOT NULL,
           nonce INTEGER,
           ts INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS history_pk ON history(pk_x, id DESC);
-        PRAGMA user_version = 1;
+        PRAGMA user_version = 2;
         COMMIT;
         "#,
     )
@@ -125,34 +137,36 @@ pub fn meta_get_u64(conn: &Connection, key: &str) -> DbResult<u64> {
 
 // ---------- leaves ----------
 
-pub fn load_leaves(conn: &Connection) -> DbResult<Vec<(u32, Fr, u64, u64)>> {
-    let mut stmt = conn.prepare("SELECT idx, pk_x, balance, nonce FROM leaves")?;
+pub fn load_leaves(conn: &Connection) -> DbResult<Vec<(u32, Fr, u64, u64, u64)>> {
+    let mut stmt = conn.prepare("SELECT idx, pk_x, cash, coll, nonce FROM leaves")?;
     let rows = stmt.query_map([], |r| {
         let idx: u32 = r.get(0)?;
         let pk_x: String = r.get(1)?;
-        let balance: String = r.get(2)?;
-        let nonce: i64 = r.get(3)?;
-        Ok((idx, pk_x, balance, nonce))
+        let cash: String = r.get(2)?;
+        let coll: String = r.get(3)?;
+        let nonce: i64 = r.get(4)?;
+        Ok((idx, pk_x, cash, coll, nonce))
     })?;
     let mut out = Vec::new();
     for row in rows {
-        let (idx, pk_x, balance, nonce) = row?;
+        let (idx, pk_x, cash, coll, nonce) = row?;
         out.push((
             idx,
             parse_fr(&pk_x).expect("db pk_x corrupt"),
-            balance.parse().expect("db balance corrupt"),
+            cash.parse().expect("db cash corrupt"),
+            coll.parse().expect("db coll corrupt"),
             nonce as u64,
         ));
     }
     Ok(out)
 }
 
-pub fn upsert_leaf(conn: &Connection, idx: u32, pk_x: &Fr, balance: u64, nonce: u64) -> DbResult<()> {
+pub fn upsert_leaf(conn: &Connection, idx: u32, pk_x: &Fr, cash: u64, coll: u64, nonce: u64) -> DbResult<()> {
     conn.execute(
-        "INSERT INTO leaves(idx, pk_x, balance, nonce) VALUES (?1, ?2, ?3, ?4)
+        "INSERT INTO leaves(idx, pk_x, cash, coll, nonce) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(idx) DO UPDATE SET pk_x = excluded.pk_x,
-           balance = excluded.balance, nonce = excluded.nonce",
-        params![idx, fr_hex(pk_x), balance.to_string(), nonce as i64],
+           cash = excluded.cash, coll = excluded.coll, nonce = excluded.nonce",
+        params![idx, fr_hex(pk_x), cash.to_string(), coll.to_string(), nonce as i64],
     )?;
     Ok(())
 }
@@ -167,6 +181,7 @@ pub struct MempoolRow {
     pub from_pk_y: Fr,
     pub to_field: Fr,
     pub withdraw_dest: Option<String>,
+    pub asset: u32,
     pub amount: u64,
     pub nonce: u64,
     pub is_withdraw: bool,
@@ -189,19 +204,20 @@ fn mempool_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MempoolRow> {
         from_pk_y: get_fr(2)?,
         to_field: get_fr(3)?,
         withdraw_dest: r.get(4)?,
-        amount: r.get::<_, String>(5)?.parse().expect("db amount corrupt"),
-        nonce: r.get::<_, i64>(6)? as u64,
-        is_withdraw: r.get::<_, i64>(7)? != 0,
-        sig_r_x: get_fr(8)?,
-        sig_r_y: get_fr(9)?,
-        sig_s_lo: get_fr(10)?,
-        sig_s_hi: get_fr(11)?,
-        status: r.get(12)?,
-        received_at: r.get(13)?,
+        asset: r.get::<_, i64>(5)? as u32,
+        amount: r.get::<_, String>(6)?.parse().expect("db amount corrupt"),
+        nonce: r.get::<_, i64>(7)? as u64,
+        is_withdraw: r.get::<_, i64>(8)? != 0,
+        sig_r_x: get_fr(9)?,
+        sig_r_y: get_fr(10)?,
+        sig_s_lo: get_fr(11)?,
+        sig_s_hi: get_fr(12)?,
+        status: r.get(13)?,
+        received_at: r.get(14)?,
     })
 }
 
-const MEMPOOL_COLS: &str = "id, from_pk_x, from_pk_y, to_field, withdraw_dest, amount, nonce, \
+const MEMPOOL_COLS: &str = "id, from_pk_x, from_pk_y, to_field, withdraw_dest, asset, amount, nonce, \
                             is_withdraw, sig_r_x, sig_r_y, sig_s_lo, sig_s_hi, status, received_at";
 
 #[allow(clippy::too_many_arguments)]
@@ -211,20 +227,22 @@ pub fn insert_mempool(
     from_pk_y: &Fr,
     to_field: &Fr,
     withdraw_dest: Option<&str>,
+    asset: u32,
     amount: u64,
     nonce: u64,
     is_withdraw: bool,
     sig: [&Fr; 4],
 ) -> DbResult<i64> {
     conn.execute(
-        "INSERT INTO mempool(from_pk_x, from_pk_y, to_field, withdraw_dest, amount, nonce,
+        "INSERT INTO mempool(from_pk_x, from_pk_y, to_field, withdraw_dest, asset, amount, nonce,
                              is_withdraw, sig_r_x, sig_r_y, sig_s_lo, sig_s_hi, received_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)",
         params![
             fr_hex(from_pk_x),
             fr_hex(from_pk_y),
             fr_hex(to_field),
             withdraw_dest,
+            asset as i64,
             amount.to_string(),
             nonce as i64,
             is_withdraw as i64,
@@ -298,30 +316,38 @@ pub fn mempool_set_status(conn: &Connection, ids: &[i64], status: &str, batch_nu
 #[derive(Debug, Clone)]
 #[allow(dead_code)] // status mirrors a DB column; not read by consumers yet
 pub struct DepositRow {
+    pub asset: u32,
     pub seq: u64,
     pub pk_x: Fr,
     pub amount: u64,
     pub status: String,
 }
 
-pub fn insert_deposit(conn: &Connection, seq: u64, pk_x: &Fr, amount: u64) -> DbResult<bool> {
+pub fn insert_deposit(conn: &Connection, asset: u32, seq: u64, pk_x: &Fr, amount: u64) -> DbResult<bool> {
     let n = conn.execute(
-        "INSERT OR IGNORE INTO deposits(seq, pk_x, amount, observed_at) VALUES (?1,?2,?3,?4)",
-        params![seq as i64, fr_hex(pk_x), amount.to_string(), now()],
+        "INSERT OR IGNORE INTO deposits(asset, seq, pk_x, amount, observed_at) VALUES (?1,?2,?3,?4,?5)",
+        params![asset as i64, seq as i64, fr_hex(pk_x), amount.to_string(), now()],
     )?;
     Ok(n > 0)
 }
 
+/// Pending deposits ordered cash-queue-prefix first, then coll (the fold
+/// order the contract recomputes), FIFO within each asset. NOTE: because a
+/// batch must consume a contiguous PREFIX of each on-chain queue, the limit
+/// must never split an asset's pending run mid-way out of seq order — the
+/// ORDER BY asset, seq guarantees this.
 pub fn deposits_pending(conn: &Connection, limit: usize) -> DbResult<Vec<DepositRow>> {
     let mut stmt = conn.prepare(
-        "SELECT seq, pk_x, amount, status FROM deposits WHERE status = 'pending' ORDER BY seq LIMIT ?1",
+        "SELECT asset, seq, pk_x, amount, status FROM deposits WHERE status = 'pending'
+         ORDER BY asset, seq LIMIT ?1",
     )?;
     let rows = stmt.query_map([limit as i64], |r| {
         Ok(DepositRow {
-            seq: r.get::<_, i64>(0)? as u64,
-            pk_x: parse_fr(&r.get::<_, String>(1)?).expect("db pk_x corrupt"),
-            amount: r.get::<_, String>(2)?.parse().expect("db amount corrupt"),
-            status: r.get(3)?,
+            asset: r.get::<_, i64>(0)? as u32,
+            seq: r.get::<_, i64>(1)? as u64,
+            pk_x: parse_fr(&r.get::<_, String>(2)?).expect("db pk_x corrupt"),
+            amount: r.get::<_, String>(3)?.parse().expect("db amount corrupt"),
+            status: r.get(4)?,
         })
     })?;
     rows.collect()
@@ -350,11 +376,11 @@ pub fn deposits_oldest_pending_age(conn: &Connection) -> DbResult<Option<i64>> {
     .map(|min| min.map(|m| now() - m))
 }
 
-pub fn deposits_set_status(conn: &Connection, seqs: &[u64], status: &str, batch_num: Option<u64>) -> DbResult<()> {
-    for seq in seqs {
+pub fn deposits_set_status(conn: &Connection, keys: &[(u32, u64)], status: &str, batch_num: Option<u64>) -> DbResult<()> {
+    for (asset, seq) in keys {
         conn.execute(
-            "UPDATE deposits SET status = ?1, batch_num = ?2 WHERE seq = ?3",
-            params![status, batch_num.map(|b| b as i64), *seq as i64],
+            "UPDATE deposits SET status = ?1, batch_num = ?2 WHERE asset = ?3 AND seq = ?4",
+            params![status, batch_num.map(|b| b as i64), *asset as i64, *seq as i64],
         )?;
     }
     Ok(())
@@ -367,7 +393,8 @@ pub struct BatchRow {
     pub batch_num: u64,
     pub old_root: Fr,
     pub new_root: Fr,
-    pub deposit_count: u32,
+    pub deposit_count_cash: u32,
+    pub deposit_count_coll: u32,
     pub da_commitment: Fr,
     pub blob_json: String,
     pub envelope_json: String,
@@ -383,20 +410,21 @@ fn batch_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BatchRow> {
         batch_num: r.get::<_, i64>(0)? as u64,
         old_root: parse_fr(&r.get::<_, String>(1)?).expect("db root corrupt"),
         new_root: parse_fr(&r.get::<_, String>(2)?).expect("db root corrupt"),
-        deposit_count: r.get::<_, i64>(3)? as u32,
-        da_commitment: parse_fr(&r.get::<_, String>(4)?).expect("db da corrupt"),
-        blob_json: r.get(5)?,
-        envelope_json: r.get(6)?,
-        proof: r.get(7)?,
-        status: r.get(8)?,
-        tx_hash: r.get(9)?,
-        created_at: r.get(10)?,
-        confirmed_at: r.get(11)?,
+        deposit_count_cash: r.get::<_, i64>(3)? as u32,
+        deposit_count_coll: r.get::<_, i64>(4)? as u32,
+        da_commitment: parse_fr(&r.get::<_, String>(5)?).expect("db da corrupt"),
+        blob_json: r.get(6)?,
+        envelope_json: r.get(7)?,
+        proof: r.get(8)?,
+        status: r.get(9)?,
+        tx_hash: r.get(10)?,
+        created_at: r.get(11)?,
+        confirmed_at: r.get(12)?,
     })
 }
 
-const BATCH_COLS: &str = "batch_num, old_root, new_root, deposit_count, da_commitment, \
-                          blob_json, envelope_json, proof, status, tx_hash, \
+const BATCH_COLS: &str = "batch_num, old_root, new_root, deposit_count_cash, deposit_count_coll, \
+                          da_commitment, blob_json, envelope_json, proof, status, tx_hash, \
                           created_at, confirmed_at";
 
 #[allow(clippy::too_many_arguments)]
@@ -405,20 +433,22 @@ pub fn insert_batch(
     batch_num: u64,
     old_root: &Fr,
     new_root: &Fr,
-    deposit_count: u32,
+    deposit_count_cash: u32,
+    deposit_count_coll: u32,
     da_commitment: &Fr,
     blob_json: &str,
     envelope_json: &str,
 ) -> DbResult<()> {
     conn.execute(
-        "INSERT INTO batches(batch_num, old_root, new_root, deposit_count, da_commitment,
-                             blob_json, envelope_json, status, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,'proving',?8)",
+        "INSERT INTO batches(batch_num, old_root, new_root, deposit_count_cash, deposit_count_coll,
+                             da_commitment, blob_json, envelope_json, status, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'proving',?9)",
         params![
             batch_num as i64,
             fr_hex(old_root),
             fr_hex(new_root),
-            deposit_count as i64,
+            deposit_count_cash as i64,
+            deposit_count_coll as i64,
             fr_hex(da_commitment),
             blob_json,
             envelope_json,
@@ -498,29 +528,33 @@ pub struct HistoryEntry {
     pub batch_num: Option<u64>,
     pub kind: String,
     pub counterparty: Option<String>,
+    pub asset: u32,
     pub amount: String,
     pub nonce: Option<u64>,
     pub status: String,
     pub ts: i64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn insert_history(
     conn: &Connection,
     pk_x: &Fr,
     batch_num: u64,
     kind: &str,
     counterparty: Option<&str>,
+    asset: u32,
     amount: u64,
     nonce: Option<u64>,
 ) -> DbResult<()> {
     conn.execute(
-        "INSERT INTO history(pk_x, batch_num, kind, counterparty, amount, nonce, ts)
-         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        "INSERT INTO history(pk_x, batch_num, kind, counterparty, asset, amount, nonce, ts)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)",
         params![
             fr_hex(pk_x),
             batch_num as i64,
             kind,
             counterparty,
+            asset as i64,
             amount.to_string(),
             nonce.map(|n| n as i64),
             now(),
@@ -533,7 +567,7 @@ pub fn history_for(conn: &Connection, pk_x: &Fr, limit: usize) -> DbResult<Vec<H
     let mut out = Vec::new();
     // Confirmed history.
     let mut stmt = conn.prepare(
-        "SELECT id, batch_num, kind, counterparty, amount, nonce, ts FROM history
+        "SELECT id, batch_num, kind, counterparty, asset, amount, nonce, ts FROM history
          WHERE pk_x = ?1 ORDER BY id DESC LIMIT ?2",
     )?;
     let rows = stmt.query_map(params![fr_hex(pk_x), limit as i64], |r| {
@@ -542,10 +576,11 @@ pub fn history_for(conn: &Connection, pk_x: &Fr, limit: usize) -> DbResult<Vec<H
             batch_num: Some(r.get::<_, i64>(1)? as u64),
             kind: r.get(2)?,
             counterparty: r.get(3)?,
-            amount: r.get(4)?,
-            nonce: r.get::<_, Option<i64>>(5)?.map(|n| n as u64),
+            asset: r.get::<_, i64>(4)? as u32,
+            amount: r.get(5)?,
+            nonce: r.get::<_, Option<i64>>(6)?.map(|n| n as u64),
             status: "batched".into(),
-            ts: r.get(6)?,
+            ts: r.get(7)?,
         })
     })?;
     for row in rows {
@@ -553,23 +588,24 @@ pub fn history_for(conn: &Connection, pk_x: &Fr, limit: usize) -> DbResult<Vec<H
     }
     // Live mempool entries (pending/batching/rejected) for this sender.
     let mut stmt = conn.prepare(
-        "SELECT id, to_field, withdraw_dest, amount, nonce, is_withdraw, status, reject_reason, received_at
+        "SELECT id, to_field, withdraw_dest, asset, amount, nonce, is_withdraw, status, reject_reason, received_at
          FROM mempool WHERE from_pk_x = ?1 AND status != 'included' ORDER BY id DESC",
     )?;
     let rows = stmt.query_map([fr_hex(pk_x)], |r| {
-        let is_withdraw: bool = r.get::<_, i64>(5)? != 0;
+        let is_withdraw: bool = r.get::<_, i64>(6)? != 0;
         let to_field: String = r.get(1)?;
         let withdraw_dest: Option<String> = r.get(2)?;
-        let status: String = r.get(6)?;
+        let status: String = r.get(7)?;
         Ok(HistoryEntry {
             id: r.get(0)?,
             batch_num: None,
             kind: if is_withdraw { "withdraw".into() } else { "transfer_out".into() },
             counterparty: if is_withdraw { withdraw_dest } else { Some(to_field) },
-            amount: r.get(3)?,
-            nonce: Some(r.get::<_, i64>(4)? as u64),
+            asset: r.get::<_, i64>(3)? as u32,
+            amount: r.get(4)?,
+            nonce: Some(r.get::<_, i64>(5)? as u64),
             status: if status == "batching" { "pending".into() } else { status },
-            ts: r.get(8)?,
+            ts: r.get(9)?,
         })
     })?;
     for row in rows {

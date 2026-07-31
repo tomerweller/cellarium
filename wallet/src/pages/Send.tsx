@@ -24,7 +24,7 @@ export function Send() {
 
   const kind = classifyRecipient(to);
   const isWithdraw = kind === 'stellar';
-  const available = account ? BigInt(account.balance) - BigInt(account.pending_out) : 0n;
+  const available = account ? BigInt(account.cash) - BigInt(account.pending_out_cash) : 0n;
 
   const validRecipient = kind === 'l2' || kind === 'stellar';
   let amountStroops: bigint | null = null;
@@ -45,6 +45,7 @@ export function Send() {
       const res = await signAndSubmit({
         sk: wallet.sk,
         to: to.trim(),
+        asset: 0n, // cash (XLM); the repo desk (M5) adds tUST flows
         amount: amountStroops,
         nonce: BigInt(account.pending_nonce),
         isWithdraw,

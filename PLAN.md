@@ -370,3 +370,30 @@ These amend the sections above and take precedence where they conflict.
   batch requires a fresh price, so the sequencer (or e2e script) refreshes the
   oracle before submitting when the last update is older than the 5-minute
   staleness bound.
+
+### 6.3 M2 implementation notes (decided during build)
+
+- **open_ts is signer-chosen**, not the batch timestamp: both parties sign the
+  full term sheet {cash, coll, rate_bps, haircut_bps, open_ts, maturity_ts}
+  (open_msg binds term_hash), so every field is known at signing time.
+  Bilateral consent makes an arbitrary open_ts safe (it only shifts interest,
+  which both parties agreed to); M3 adds the `maturity_ts > batch_ts` check at
+  inclusion.
+- **Slot-collision safety is structural**: opens apply sequentially against
+  the running position root and each must prove its slot's old leaf == 0, so
+  two opens in one batch cannot target the same slot, and an open may safely
+  fill a slot zeroed by an earlier close in the same batch. No extra
+  distinctness constraint needed beyond ordering closes before opens.
+- **DA commitment covers off-chain-originated ops only** (opens as
+  P2([open_msg, pos_index]), later closes/liquidations, and payments' tx
+  messages, in application order). Deposits stay out of the DA fold: their
+  data is already on-chain in the queues and bound by deposit_hash.
+- **Single circuit package `batch_repo`** for both fixtures and deployment,
+  sizes D=4 deposits, O=2 opens, T=4 payments at M2 (+C=2 closes, L=2
+  liq/defaults at M3/M4); revisit after prove-time measurement.
+- **Intents carry both parties' nonces**: the initiator signs open_msg with
+  the counterparty's current pending nonce baked in; if that nonce moves
+  before inclusion the open fails admission and is dropped (prototype
+  caveat, documented).
+- **Genesis state root** = P2([empty_root_d8, empty_root_d8]) — the position
+  tree shares the account tree's node/empty conventions.

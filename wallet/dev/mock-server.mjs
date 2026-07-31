@@ -9,19 +9,20 @@ import { poseidon2Hash } from '@zkpassport/poseidon2';
 const PORT = 8787;
 const DEPTH = 8;
 const DOMAIN_LEAF = 1n;
-const SEED_BALANCE = 5000000n; // 0.5 XLM
+const SEED_CASH = 5000000n; // 0.5 XLM
+const SEED_COLL = 2000000000n; // 200 tUST
 
 const p2 = (xs) => poseidon2Hash(xs);
 const toHex = (v) => '0x' + v.toString(16).padStart(64, '0');
 const fromHex = (s) => BigInt(s);
 
-// idx -> {pkX(bigint), balance(bigint), nonce(bigint)}
+// idx -> {pkX(bigint), cash(bigint), coll(bigint), nonce(bigint)}
 const leaves = new Map();
 let batchNum = 0;
 const history = new Map(); // pkXHex -> entries[]
 
 function leafValue(a) {
-  return a ? p2([DOMAIN_LEAF, a.pkX, a.balance, a.nonce]) : 0n;
+  return a ? p2([DOMAIN_LEAF, a.pkX, p2([a.cash, a.coll]), a.nonce]) : 0n;
 }
 function level0() {
   const out = [];
@@ -54,7 +55,7 @@ function findOrSeed(pkXHex) {
   const pkX = fromHex(pkXHex);
   for (const [idx, a] of leaves) if (a.pkX === pkX) return idx;
   const idx = leaves.size;
-  leaves.set(idx, { pkX, balance: SEED_BALANCE, nonce: 0n });
+  leaves.set(idx, { pkX, cash: SEED_CASH, coll: SEED_COLL, nonce: 0n });
   return idx;
 }
 
@@ -72,10 +73,12 @@ const server = createServer(async (req, res) => {
     return json(res, 200, {
       contract_id: 'CMOCK000000000000000000000000000000000000000000000000000',
       token_id: 'CMOCKTOKEN00000000000000000000000000000000000000000000000',
+      tust_id: 'CMOCKTUST000000000000000000000000000000000000000000000000',
       network_passphrase: 'Test SDF Network ; September 2015',
       rpc_url: 'https://soroban-testnet.stellar.org',
       batch: { deposits: 4, txs: 16 },
-      domains: { leaf: 1, tx: 2, sig: 3, dep: 4, wd: 5, addr: 6, da: 7 },
+      assets: { cash: 0, coll: 1 },
+      domains: { leaf: 1, tx: 2, sig: 3, addr: 6, da: 7, dep2: 11, wd2: 12 },
     });
   if (parts[0] === 'status')
     return json(res, 200, {
@@ -88,8 +91,9 @@ const server = createServer(async (req, res) => {
     const idx = findOrSeed(pkXHex);
     const a = leaves.get(idx);
     return json(res, 200, {
-      pk_x: pkXHex, index: idx, balance: a.balance.toString(), nonce: Number(a.nonce),
-      pending_nonce: Number(a.nonce), pending_out: '0',
+      pk_x: pkXHex, index: idx, cash: a.cash.toString(), coll: a.coll.toString(),
+      nonce: Number(a.nonce), pending_nonce: Number(a.nonce),
+      pending_out_cash: '0', pending_out_coll: '0',
       root: toHex(root()), batch_num: batchNum, siblings: path(idx).map(toHex),
     });
   }
@@ -105,20 +109,23 @@ const server = createServer(async (req, res) => {
     const fromIdx = findOrSeed(tx.from_pk_x);
     const from = leaves.get(fromIdx);
     const amount = BigInt(tx.amount);
+    const bal = (a) => (tx.asset === 1 ? a.coll : a.cash);
+    const setBal = (a, v) => (tx.asset === 1 ? (a.coll = v) : (a.cash = v));
     if (Number(from.nonce) !== tx.nonce)
       return json(res, 409, { error: { code: 'NONCE_MISMATCH', message: `expected ${from.nonce}` } });
-    if (from.balance < amount)
+    if (bal(from) < amount)
       return json(res, 409, { error: { code: 'INSUFFICIENT_BALANCE', message: 'too low' } });
-    from.balance -= amount;
+    setBal(from, bal(from) - amount);
     from.nonce += 1n;
     if (!tx.is_withdraw) {
       const toIdx = findOrSeed(tx.to);
-      leaves.get(toIdx).balance += amount;
+      const to = leaves.get(toIdx);
+      setBal(to, bal(to) + amount);
     }
     batchNum += 1;
     const push = (pk, e) => history.set(pk, [{ id: batchNum * 10 + fromIdx, batch_num: batchNum, status: 'batched', ts: Math.floor(Date.now() / 1000), ...e }, ...(history.get(pk) ?? [])]);
-    if (tx.is_withdraw) push(tx.from_pk_x, { kind: 'withdraw', counterparty: tx.to, amount: tx.amount, nonce: tx.nonce });
-    else { push(tx.from_pk_x, { kind: 'transfer_out', counterparty: tx.to, amount: tx.amount, nonce: tx.nonce }); push(tx.to, { kind: 'transfer_in', counterparty: tx.from_pk_x, amount: tx.amount, nonce: null }); }
+    if (tx.is_withdraw) push(tx.from_pk_x, { kind: 'withdraw', counterparty: tx.to, asset: tx.asset, amount: tx.amount, nonce: tx.nonce });
+    else { push(tx.from_pk_x, { kind: 'transfer_out', counterparty: tx.to, asset: tx.asset, amount: tx.amount, nonce: tx.nonce }); push(tx.to, { kind: 'transfer_in', counterparty: tx.from_pk_x, asset: tx.asset, amount: tx.amount, nonce: null }); }
     return json(res, 200, { id: batchNum, status: 'pending' });
   }
 

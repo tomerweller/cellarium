@@ -52,7 +52,7 @@ export function usePending(pkX: string | undefined): Pending {
 
   // Clear settled deposits once the balance reflects them.
   useEffect(() => {
-    if (pkX && account) pendingDeposits.reconcile(pkX, BigInt(account.balance));
+    if (pkX && account) pendingDeposits.reconcile(pkX, BigInt(account.cash));
   }, [pkX, account]);
 
   const sending = (history?.entries ?? []).filter(

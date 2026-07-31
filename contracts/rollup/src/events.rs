@@ -4,6 +4,7 @@ use soroban_sdk::{contractevent, BytesN};
 pub struct Deposit<'a> {
     #[topic]
     pub seq: &'a u64,
+    pub asset: &'a u32,
     pub pk_x: &'a BytesN<32>,
     pub amount: &'a i128,
 }

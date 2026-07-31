@@ -1,5 +1,5 @@
 use harness::poseidon::{fr_from_u64, to_hex, Hasher};
-use harness::tree::{Account, Tree};
+use harness::tree::{Account, Asset, Tree};
 
 fn main() {
     let mode = std::env::args().nth(1).unwrap_or_default();
@@ -47,11 +47,16 @@ fn vectors() {
 
     let account = Account {
         pk_x: fr_from_u64(1234),
-        balance: 100,
+        cash: 100,
+        coll: 40,
         nonce: 0,
     };
     println!(
-        "leaf(1234, 100, 0)     = {}",
+        "bal_hash(100, 40)      = {}",
+        to_hex(&Tree::bal_hash(&hasher, 100, 40))
+    );
+    println!(
+        "leaf(1234, 100, 40, 0) = {}",
         to_hex(&Tree::leaf_value(&hasher, Some(&account)))
     );
 
@@ -118,8 +123,8 @@ fn demo_batch() {
 
     let mut tree = Tree::new();
     let txs = [
-        make_signed_tx(&hasher, &alice, bob.pk_x(), 200, 0, false, &mut rng),
-        make_signed_tx(&hasher, &bob, wd_field, 100, 0, true, &mut rng),
+        make_signed_tx(&hasher, &alice, bob.pk_x(), Asset::Cash, 200, 0, false, &mut rng),
+        make_signed_tx(&hasher, &bob, wd_field, Asset::Coll, 100, 0, true, &mut rng),
     ];
     let witness = build_batch(
         &hasher,
@@ -127,8 +132,8 @@ fn demo_batch() {
         2,
         4,
         &[
-            DepositRequest { pk_x: alice.pk_x(), amount: 1000 },
-            DepositRequest { pk_x: bob.pk_x(), amount: 500 },
+            DepositRequest { pk_x: alice.pk_x(), asset: Asset::Cash, amount: 1000 },
+            DepositRequest { pk_x: bob.pk_x(), asset: Asset::Coll, amount: 500 },
         ],
         &txs,
     )
@@ -148,10 +153,10 @@ fn demo_batch() {
         "withdraw_hash": to_hex(&witness.withdraw_hash),
         "da_commitment": to_hex(&witness.da_commitment),
         "deposits": [
-            { "pk_x": to_hex(&alice.pk_x()), "amount": 1000 },
-            { "pk_x": to_hex(&bob.pk_x()), "amount": 500 },
+            { "pk_x": to_hex(&alice.pk_x()), "asset": 0, "amount": 1000 },
+            { "pk_x": to_hex(&bob.pk_x()), "asset": 1, "amount": 500 },
         ],
-        "withdrawals": [ { "dest": wd_addr, "amount": 100 } ],
+        "withdrawals": [ { "dest": wd_addr, "asset": 1, "amount": 100 } ],
     });
     let root = prover::repo_root();
     let fixture_dir = root.join("fixtures/batch_n4");
@@ -171,8 +176,9 @@ fn demo_batch() {
     let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
     let envelope = serde_json::json!({
         "new_root": to_hex(&witness.new_root).trim_start_matches("0x"),
-        "deposit_count": 2,
-        "withdrawals": [ { "dest": wd_addr, "amount": "100" } ],
+        "deposit_count_cash": 1,
+        "deposit_count_coll": 1,
+        "withdrawals": [ { "dest": wd_addr, "asset": 1, "amount": "100" } ],
         "da_commitment": to_hex(&witness.da_commitment).trim_start_matches("0x"),
         "proof": hex(&proof),
     });
@@ -203,9 +209,15 @@ fn demo_batch_sized(d: usize, n: usize, pkg: &str) {
     let wd_field = address_to_field(&hasher, &wd_addr());
 
     let mut tree = Tree::new();
+    // Alternate assets so scaling batches exercise both balance legs.
     let deposits: Vec<DepositRequest> = users
         .iter()
-        .map(|u| DepositRequest { pk_x: u.pk_x(), amount: 1_000_000 })
+        .enumerate()
+        .map(|(i, u)| DepositRequest {
+            pk_x: u.pk_x(),
+            asset: if i < d / 2 { Asset::Cash } else { Asset::Coll },
+            amount: 1_000_000,
+        })
         .collect();
 
     let mut nonces: HashMap<usize, u64> = HashMap::new();
@@ -221,12 +233,14 @@ fn demo_batch_sized(d: usize, n: usize, pkg: &str) {
         let from = i % d;
         let to = &users[(i + 1) % d];
         let nonce = next_nonce(from);
-        txs.push(make_signed_tx(&hasher, &users[from], to.pk_x(), 50 + i as u64, nonce, false, &mut rng));
+        // Spend the asset this user was funded with.
+        let asset = if from < d / 2 { Asset::Cash } else { Asset::Coll };
+        txs.push(make_signed_tx(&hasher, &users[from], to.pk_x(), asset, 50 + i as u64, nonce, false, &mut rng));
     }
     let n0 = next_nonce(0);
-    txs.push(make_signed_tx(&hasher, &users[0], wd_field, 77, n0, true, &mut rng));
+    txs.push(make_signed_tx(&hasher, &users[0], wd_field, Asset::Cash, 77, n0, true, &mut rng));
     let n1 = next_nonce(1);
-    txs.push(make_signed_tx(&hasher, &users[1], wd_field, 88, n1, true, &mut rng));
+    txs.push(make_signed_tx(&hasher, &users[1], wd_field, Asset::Cash, 88, n1, true, &mut rng));
 
     let witness = build_batch(&hasher, &mut tree, d, n, &deposits, &txs).expect("demo batch must build");
     println!("new_root = {}", to_hex(&witness.new_root));
@@ -255,9 +269,25 @@ fn vectors_json() {
     let da_fold = hasher.hash(&[fr_from_u64(harness::batch::DOMAIN_DA), fr_from_u64(0), fr_from_u64(42)]);
     let empty_root = T::new().root(&hasher);
     let mut t5 = T::new();
-    t5.set(5, Account { pk_x: fr_from_u64(1234), balance: 100, nonce: 0 });
+    t5.set(5, Account { pk_x: fr_from_u64(1234), cash: 100, coll: 40, nonce: 0 });
+    let bal_hash = T::bal_hash(&hasher, 100, 40);
     let leaf = T::leaf_value(&hasher, t5.get(5));
     let root5 = t5.root(&hasher);
+    // Fold-step primitives for the multi-asset deposit/withdraw folds.
+    let dep2_fold = harness::batch::dep_fold(
+        &hasher,
+        harness::poseidon::FR_ZERO,
+        fr_from_u64(1234),
+        Asset::Coll,
+        77,
+    );
+    let wd2_fold = harness::batch::wd_fold(
+        &hasher,
+        harness::poseidon::FR_ZERO,
+        fr_from_u64(1234),
+        Asset::Coll,
+        77,
+    );
 
     // Pad signature (sk=7, k=13, msg=42) — the PAD_* globals in tx.nr.
     let pad_kp = Keypair::from_sk_raw(ark_grumpkin::Fr::from(7u64));
@@ -271,8 +301,8 @@ fn vectors_json() {
     let wd_field = address_to_field(&hasher, &wd_dest);
     let mut tree = T::new();
     let txs = [
-        make_signed_tx(&hasher, &alice, bob.pk_x(), 200, 0, false, &mut rng),
-        make_signed_tx(&hasher, &bob, wd_field, 100, 0, true, &mut rng),
+        make_signed_tx(&hasher, &alice, bob.pk_x(), Asset::Cash, 200, 0, false, &mut rng),
+        make_signed_tx(&hasher, &bob, wd_field, Asset::Coll, 100, 0, true, &mut rng),
     ];
     let w = build_batch(
         &hasher,
@@ -280,13 +310,13 @@ fn vectors_json() {
         2,
         4,
         &[
-            DepositRequest { pk_x: alice.pk_x(), amount: 1000 },
-            DepositRequest { pk_x: bob.pk_x(), amount: 500 },
+            DepositRequest { pk_x: alice.pk_x(), asset: Asset::Cash, amount: 1000 },
+            DepositRequest { pk_x: bob.pk_x(), asset: Asset::Coll, amount: 500 },
         ],
         &txs,
     )
     .expect("demo scenario must build");
-    let msg1 = harness::batch::tx_message(&hasher, alice.pk_x(), bob.pk_x(), 200, 0, false);
+    let msg1 = harness::batch::tx_message(&hasher, alice.pk_x(), bob.pk_x(), Asset::Cash, 200, 0, false);
 
     let json = serde_json::json!({
         "_generated": "cargo run -p harness -- vectors-json (do not edit; scripts/check_vectors.sh gates drift)",
@@ -294,8 +324,11 @@ fn vectors_json() {
         "hash4_1_2_3_4": to_hex(&hash4),
         "da_fold_0_42": to_hex(&da_fold),
         "empty_root_d8": to_hex(&empty_root),
-        "leaf_1234_100_0": to_hex(&leaf),
+        "bal_hash_100_40": to_hex(&bal_hash),
+        "leaf_1234_100_40_0": to_hex(&leaf),
         "root_leaf_at_5": to_hex(&root5),
+        "dep2_fold_0_1234_coll_77": to_hex(&dep2_fold),
+        "wd2_fold_0_1234_coll_77": to_hex(&wd2_fold),
         "pad": {
             "pk_x": to_hex(&pad_kp.pk_x()),
             "pk_y": to_hex(&pad_kp.pk_y()),
@@ -308,7 +341,7 @@ fn vectors_json() {
         "bob_pk_x": to_hex(&bob.pk_x()),
         "wd_dest": wd_dest,
         "wd_dest_field": to_hex(&wd_field),
-        "tx_message_alice_bob_200_0": to_hex(&msg1),
+        "tx_message_alice_bob_cash_200_0": to_hex(&msg1),
         "demo": {
             "old_root": to_hex(&w.old_root),
             "new_root": to_hex(&w.new_root),
@@ -316,10 +349,10 @@ fn vectors_json() {
             "withdraw_hash": to_hex(&w.withdraw_hash),
             "da_commitment": to_hex(&w.da_commitment),
             "deposits": [
-                { "pk_x": to_hex(&alice.pk_x()), "amount": "1000" },
-                { "pk_x": to_hex(&bob.pk_x()), "amount": "500" },
+                { "pk_x": to_hex(&alice.pk_x()), "asset": 0, "amount": "1000" },
+                { "pk_x": to_hex(&bob.pk_x()), "asset": 1, "amount": "500" },
             ],
-            "withdrawals": [ { "dest": wd_dest, "amount": "100" } ],
+            "withdrawals": [ { "dest": wd_dest, "asset": 1, "amount": "100" } ],
         },
     });
     let path = "fixtures/vectors.json";

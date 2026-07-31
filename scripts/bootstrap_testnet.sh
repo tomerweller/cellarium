@@ -79,7 +79,7 @@ GENESIS_HEX=${GENESIS#0x}
 
 echo "==> deploying rollup contract"
 ROLLUP=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NET" -- \
-  --token "$TOKEN" --vk "$VK" --genesis_root "$GENESIS_HEX")
+  --token_cash "$TOKEN" --token_coll "$TUST" --vk "$VK" --genesis_root "$GENESIS_HEX")
 echo "    $ROLLUP"
 
 echo "==> writing .env"

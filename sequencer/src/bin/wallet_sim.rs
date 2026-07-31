@@ -2,11 +2,11 @@
 //! CLI and signs/POSTs L2 transactions with the harness's Grumpkin keys.
 //! Deterministic keys by small scalar so pk_x values match the repo fixtures.
 //!
-//! Usage:
+//! Usage (asset: 0 = cash/XLM, 1 = coll/tUST):
 //!   wallet-sim pk <sk>
-//!   wallet-sim deposit <l2_pk_x_hex> <amount>          (funder = SEQ key)
-//!   wallet-sim send <from_sk> <to_pk_x_hex> <amount> <nonce>
-//!   wallet-sim withdraw <from_sk> <dest_strkey> <amount> <nonce>
+//!   wallet-sim deposit <l2_pk_x_hex> <asset> <amount>   (funder = SEQ key)
+//!   wallet-sim send <from_sk> <to_pk_x_hex> <asset> <amount> <nonce>
+//!   wallet-sim withdraw <from_sk> <dest_strkey> <asset> <amount> <nonce>
 //!
 //! Env: SORIBIUM_URL (default http://127.0.0.1:8080), CONTRACT_ID, SEQ_KEY
 //! (stellar CLI identity name or secret), plus standard stellar network vars.
@@ -15,6 +15,7 @@ use harness::batch::tx_message;
 use harness::keys::{sign, Keypair};
 use harness::l1::address_to_field;
 use harness::poseidon::{to_hex, Fr, Hasher};
+use harness::tree::Asset;
 
 fn seq_url() -> String {
     std::env::var("SORIBIUM_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into())
@@ -57,7 +58,8 @@ fn main() {
         }
         "deposit" => {
             let l2_pk_x = &args[2];
-            let amount = &args[3];
+            let asset = &args[3];
+            let amount = &args[4];
             let contract = std::env::var("CONTRACT_ID").expect("CONTRACT_ID");
             let key = std::env::var("SEQ_KEY").expect("SEQ_KEY");
             let rpc = std::env::var("RPC_URL").unwrap_or_else(|_| "https://soroban-testnet.stellar.org".into());
@@ -70,7 +72,8 @@ fn main() {
                 .args([
                     "contract", "invoke", "--id", &contract, "--rpc-url", &rpc,
                     "--network-passphrase", &pass, "--source-account", &key, "--",
-                    "deposit", "--from", &addr, "--l2_pk_x", l2_pk_x_bare, "--amount", amount,
+                    "deposit", "--from", &addr, "--l2_pk_x", l2_pk_x_bare, "--asset", asset,
+                    "--amount", amount,
                 ])
                 .status()
                 .expect("stellar invoke");
@@ -79,14 +82,17 @@ fn main() {
         "send" => {
             let from = keypair(args[2].parse().unwrap());
             let to: Fr = parse_hex(&args[3]);
-            let amount: u64 = args[4].parse().unwrap();
-            let nonce: u64 = args[5].parse().unwrap();
-            let msg = tx_message(&hasher, from.pk_x(), to, amount, nonce, false);
+            let asset_id: u32 = args[4].parse().unwrap();
+            let asset = Asset::from_u32(asset_id).expect("asset must be 0 or 1");
+            let amount: u64 = args[5].parse().unwrap();
+            let nonce: u64 = args[6].parse().unwrap();
+            let msg = tx_message(&hasher, from.pk_x(), to, asset, amount, nonce, false);
             let sig = sign(&hasher, &from, msg, &mut rand::thread_rng());
             post_tx(&serde_json::json!({
                 "from_pk_x": to_hex(&from.pk_x()),
                 "from_pk_y": to_hex(&from.pk_y()),
                 "to": to_hex(&to),
+                "asset": asset_id,
                 "amount": amount.to_string(),
                 "nonce": nonce,
                 "is_withdraw": false,
@@ -96,15 +102,18 @@ fn main() {
         "withdraw" => {
             let from = keypair(args[2].parse().unwrap());
             let dest = &args[3];
-            let amount: u64 = args[4].parse().unwrap();
-            let nonce: u64 = args[5].parse().unwrap();
+            let asset_id: u32 = args[4].parse().unwrap();
+            let asset = Asset::from_u32(asset_id).expect("asset must be 0 or 1");
+            let amount: u64 = args[5].parse().unwrap();
+            let nonce: u64 = args[6].parse().unwrap();
             let to_field = address_to_field(&hasher, dest);
-            let msg = tx_message(&hasher, from.pk_x(), to_field, amount, nonce, true);
+            let msg = tx_message(&hasher, from.pk_x(), to_field, asset, amount, nonce, true);
             let sig = sign(&hasher, &from, msg, &mut rand::thread_rng());
             post_tx(&serde_json::json!({
                 "from_pk_x": to_hex(&from.pk_x()),
                 "from_pk_y": to_hex(&from.pk_y()),
                 "to": dest,
+                "asset": asset_id,
                 "amount": amount.to_string(),
                 "nonce": nonce,
                 "is_withdraw": true,

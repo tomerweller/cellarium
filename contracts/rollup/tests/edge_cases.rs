@@ -1,10 +1,13 @@
 //! submit_batch edge cases the custody-loop suite doesn't reach:
-//! withdrawal-list bounds, multi-batch FIFO queue progression, and the
-//! (intentional) permissionless-submit property. All envelope validation
-//! under test happens before proof verification, so a fixture-length proof
-//! is enough for the rejects; the queue-progression test lands the real
-//! fixture proof.
-use rollup::{BatchEnvelope, RollupContract, RollupContractClient, RollupError, Withdrawal};
+//! withdrawal-list bounds, multi-batch FIFO queue progression (per asset),
+//! and the (intentional) permissionless-submit property. All envelope
+//! validation under test happens before proof verification, so a
+//! fixture-length proof is enough for the rejects; the queue-progression
+//! test lands the real fixture proof.
+use rollup::{
+    BatchEnvelope, RollupContract, RollupContractClient, RollupError, Withdrawal, ASSET_CASH,
+    ASSET_COLL,
+};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{token, vec, Address, Bytes, BytesN, Env, String as SString, Vec};
 
@@ -35,14 +38,15 @@ fn setup() -> Setup<'static> {
     let meta: serde_json::Value = serde_json::from_str(META).unwrap();
 
     let admin = Address::generate(&env);
-    let sac = env.register_stellar_asset_contract_v2(admin.clone());
-    let token_admin = token::StellarAssetClient::new(&env, &sac.address());
+    let cash_sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let coll_sac = env.register_stellar_asset_contract_v2(admin.clone());
     let funder = Address::generate(&env);
-    token_admin.mint(&funder, &1_000_000);
+    token::StellarAssetClient::new(&env, &cash_sac.address()).mint(&funder, &1_000_000);
+    token::StellarAssetClient::new(&env, &coll_sac.address()).mint(&funder, &1_000_000);
 
     let vk = Bytes::from_slice(&env, VK);
     let genesis = BytesN::from_array(&env, &hex32(meta["old_root"].as_str().unwrap()));
-    let rollup_id = env.register(RollupContract, (sac.address(), vk, genesis));
+    let rollup_id = env.register(RollupContract, (cash_sac.address(), coll_sac.address(), vk, genesis));
     let rollup = RollupContractClient::new(&env, &rollup_id);
     Setup { env: env.clone(), rollup, funder, meta }
 }
@@ -50,7 +54,8 @@ fn setup() -> Setup<'static> {
 fn envelope_with_withdrawals(env: &Env, wds: Vec<Withdrawal>) -> BatchEnvelope {
     BatchEnvelope {
         new_root: BytesN::from_array(env, &[9u8; 32]),
-        deposit_count: 0,
+        deposit_count_cash: 0,
+        deposit_count_coll: 0,
         withdrawals: wds,
         da_commitment: BytesN::from_array(env, &[0u8; 32]),
         proof: Bytes::from_slice(env, PROOF), // right length; never reaches verify
@@ -62,14 +67,14 @@ fn nine_withdrawals_rejected() {
     let s = setup();
     let mut wds = vec![&s.env];
     for _ in 0..9 {
-        wds.push_back(Withdrawal { dest: Address::generate(&s.env), amount: 1 });
+        wds.push_back(Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: 1 });
     }
     let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope_with_withdrawals(&s.env, wds));
     assert_eq!(r, Err(Ok(RollupError::TooManyWithdrawals)));
     // Exactly 8 passes the bound (and then fails later, at verification).
     let mut wds = vec![&s.env];
     for _ in 0..8 {
-        wds.push_back(Withdrawal { dest: Address::generate(&s.env), amount: 1 });
+        wds.push_back(Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: 1 });
     }
     let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope_with_withdrawals(&s.env, wds));
     assert_eq!(r, Err(Ok(RollupError::VerificationFailed)));
@@ -79,13 +84,27 @@ fn nine_withdrawals_rejected() {
 fn withdrawal_amount_bounds() {
     let s = setup();
     for bad in [0i128, -5, (u64::MAX as i128) + 1] {
-        let wds = vec![&s.env, Withdrawal { dest: Address::generate(&s.env), amount: bad }];
+        let wds = vec![
+            &s.env,
+            Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: bad },
+        ];
         let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope_with_withdrawals(&s.env, wds));
         assert_eq!(r, Err(Ok(RollupError::InvalidAmount)), "amount {bad} must be rejected");
     }
 }
 
-/// The FIFO queue advances by exactly deposit_count: entries beyond the
+#[test]
+fn withdrawal_asset_bounds() {
+    let s = setup();
+    let wds = vec![
+        &s.env,
+        Withdrawal { dest: Address::generate(&s.env), asset: 2, amount: 1 },
+    ];
+    let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope_with_withdrawals(&s.env, wds));
+    assert_eq!(r, Err(Ok(RollupError::InvalidAsset)));
+}
+
+/// Each FIFO queue advances by exactly its deposit_count: entries beyond the
 /// consumed prefix stay pending (with their seq/order intact) for the next
 /// batch, and consumed entries are gone.
 #[test]
@@ -99,30 +118,35 @@ fn partial_queue_consumption_across_batches() {
         a
     });
 
-    // Queue three; the fixture batch consumes the first two.
-    s.rollup.deposit(&s.funder, &alice_pk, &1000);
-    s.rollup.deposit(&s.funder, &bob_pk, &500);
-    s.rollup.deposit(&s.funder, &carol_pk, &700);
-    assert_eq!((s.rollup.dep_head(), s.rollup.dep_tail()), (0, 3));
+    // Queue three (alice cash, bob coll, carol cash); the fixture batch
+    // consumes exactly (1 cash, 1 coll) — carol's cash entry must survive.
+    s.rollup.deposit(&s.funder, &alice_pk, &ASSET_CASH, &1000);
+    s.rollup.deposit(&s.funder, &bob_pk, &ASSET_COLL, &500);
+    s.rollup.deposit(&s.funder, &carol_pk, &ASSET_CASH, &700);
+    assert_eq!((s.rollup.dep_head(&ASSET_CASH), s.rollup.dep_tail(&ASSET_CASH)), (0, 2));
+    assert_eq!((s.rollup.dep_head(&ASSET_COLL), s.rollup.dep_tail(&ASSET_COLL)), (0, 1));
 
     let wd_dest = Address::from_string(&SString::from_str(&s.env, s.meta["withdrawals"][0]["dest"].as_str().unwrap()));
     let envelope = BatchEnvelope {
         new_root: BytesN::from_array(&s.env, &hex32(s.meta["new_root"].as_str().unwrap())),
-        deposit_count: 2,
-        withdrawals: vec![&s.env, Withdrawal { dest: wd_dest, amount: 100 }],
+        deposit_count_cash: 1,
+        deposit_count_coll: 1,
+        withdrawals: vec![&s.env, Withdrawal { dest: wd_dest, asset: ASSET_COLL, amount: 100 }],
         da_commitment: BytesN::from_array(&s.env, &hex32(s.meta["da_commitment"].as_str().unwrap())),
         proof: Bytes::from_slice(&s.env, PROOF),
     };
     s.env.cost_estimate().budget().reset_unlimited();
     s.rollup.submit_batch(&Address::generate(&s.env), &envelope);
 
-    // Head advanced past the consumed prefix; carol still queued with seq 2.
-    assert_eq!((s.rollup.dep_head(), s.rollup.dep_tail()), (2, 3));
-    assert_eq!(s.rollup.pending_deposit_count(), 1);
-    assert_eq!(s.rollup.get_pending_deposit(&2).amount, 700);
+    // Cash head advanced past the consumed prefix; carol still queued (seq 1).
+    assert_eq!((s.rollup.dep_head(&ASSET_CASH), s.rollup.dep_tail(&ASSET_CASH)), (1, 2));
+    assert_eq!((s.rollup.dep_head(&ASSET_COLL), s.rollup.dep_tail(&ASSET_COLL)), (1, 1));
+    assert_eq!(s.rollup.pending_deposit_count(&ASSET_CASH), 1);
+    assert_eq!(s.rollup.pending_deposit_count(&ASSET_COLL), 0);
+    assert_eq!(s.rollup.get_pending_deposit(&ASSET_CASH, &1).amount, 700);
     // Consumed entries are released from storage entirely.
-    assert!(s.rollup.try_get_pending_deposit(&0).is_err());
-    assert!(s.rollup.try_get_pending_deposit(&1).is_err());
+    assert!(s.rollup.try_get_pending_deposit(&ASSET_CASH, &0).is_err());
+    assert!(s.rollup.try_get_pending_deposit(&ASSET_COLL, &0).is_err());
     assert_eq!(s.rollup.batch_num(), 1);
 }
 
@@ -135,14 +159,15 @@ fn submit_is_permissionless_by_design() {
     let s = setup();
     let alice_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()));
     let bob_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()));
-    s.rollup.deposit(&s.funder, &alice_pk, &1000);
-    s.rollup.deposit(&s.funder, &bob_pk, &500);
+    s.rollup.deposit(&s.funder, &alice_pk, &ASSET_CASH, &1000);
+    s.rollup.deposit(&s.funder, &bob_pk, &ASSET_COLL, &500);
 
     let wd_dest = Address::from_string(&SString::from_str(&s.env, s.meta["withdrawals"][0]["dest"].as_str().unwrap()));
     let envelope = BatchEnvelope {
         new_root: BytesN::from_array(&s.env, &hex32(s.meta["new_root"].as_str().unwrap())),
-        deposit_count: 2,
-        withdrawals: vec![&s.env, Withdrawal { dest: wd_dest, amount: 100 }],
+        deposit_count_cash: 1,
+        deposit_count_coll: 1,
+        withdrawals: vec![&s.env, Withdrawal { dest: wd_dest, asset: ASSET_COLL, amount: 100 }],
         da_commitment: BytesN::from_array(&s.env, &hex32(s.meta["da_commitment"].as_str().unwrap())),
         proof: Bytes::from_slice(&s.env, PROOF),
     };

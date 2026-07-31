@@ -33,10 +33,12 @@ pub fn to_prover_toml(w: &BatchWitness) -> String {
     for d in &w.deposits {
         let _ = writeln!(out, "\n[[deposits]]");
         let _ = writeln!(out, "pk_x = {}", fr_lit(&d.pk_x));
+        let _ = writeln!(out, "asset = {}", u64_lit(d.asset as u64));
         let _ = writeln!(out, "amount = {}", u64_lit(d.amount));
         let _ = writeln!(out, "index = {}", u64_lit(d.index as u64));
         let _ = writeln!(out, "old_pk_x = {}", fr_lit(&d.old_pk_x));
-        let _ = writeln!(out, "old_balance = {}", u64_lit(d.old_balance));
+        let _ = writeln!(out, "old_cash = {}", u64_lit(d.old_cash));
+        let _ = writeln!(out, "old_coll = {}", u64_lit(d.old_coll));
         let _ = writeln!(out, "old_nonce = {}", u64_lit(d.old_nonce));
         let _ = writeln!(out, "siblings = {}", siblings_lit(&d.siblings));
         let _ = writeln!(out, "is_active = {}", bool_lit(d.is_active));
@@ -46,14 +48,17 @@ pub fn to_prover_toml(w: &BatchWitness) -> String {
         let _ = writeln!(out, "from_pk_x = {}", fr_lit(&t.from_pk_x));
         let _ = writeln!(out, "from_pk_y = {}", fr_lit(&t.from_pk_y));
         let _ = writeln!(out, "from_index = {}", u64_lit(t.from_index as u64));
-        let _ = writeln!(out, "from_balance = {}", u64_lit(t.from_balance));
+        let _ = writeln!(out, "from_cash = {}", u64_lit(t.from_cash));
+        let _ = writeln!(out, "from_coll = {}", u64_lit(t.from_coll));
         let _ = writeln!(out, "from_nonce = {}", u64_lit(t.from_nonce));
         let _ = writeln!(out, "from_siblings = {}", siblings_lit(&t.from_siblings));
         let _ = writeln!(out, "to_field = {}", fr_lit(&t.to_field));
         let _ = writeln!(out, "to_index = {}", u64_lit(t.to_index as u64));
-        let _ = writeln!(out, "to_balance = {}", fr_lit(&t.to_balance_or_leaf));
+        let _ = writeln!(out, "to_cash = {}", fr_lit(&t.to_cash_or_leaf));
+        let _ = writeln!(out, "to_coll = {}", u64_lit(t.to_coll));
         let _ = writeln!(out, "to_nonce = {}", u64_lit(t.to_nonce));
         let _ = writeln!(out, "to_siblings = {}", siblings_lit(&t.to_siblings));
+        let _ = writeln!(out, "asset = {}", u64_lit(t.asset as u64));
         let _ = writeln!(out, "amount = {}", u64_lit(t.amount));
         let _ = writeln!(out, "is_withdraw = {}", bool_lit(t.is_withdraw));
         let _ = writeln!(out, "is_active = {}", bool_lit(t.is_active));

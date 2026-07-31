@@ -58,6 +58,12 @@ fn signature_binds_amount() {
 }
 
 #[test(should_fail)]
+fn signature_binds_asset() {
+    let (root, w) = tx_vectors::asset_not_signed();
+    let _ = apply_tx(root, 0, 0, w);
+}
+
+#[test(should_fail)]
 fn zero_amount_spend_rejected() {
     let (root, w) = tx_vectors::zero_amount();
     let _ = apply_tx(root, 0, 0, w);

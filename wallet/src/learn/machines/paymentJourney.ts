@@ -58,7 +58,7 @@ function admit(ctx: Ctx, ev: { from: string; to: string; amount: bigint }):
     return { ok: false, note: `INSUFFICIENT_BALANCE — available ${(from.balance - pendingOut) / 10_000_000n} XLM` };
 
   // Real Schnorr signature over the real message hash.
-  const msg = txMessage(from.pkX, to.pkX, ev.amount, nonce, false);
+  const msg = txMessage(from.pkX, to.pkX, 0n, ev.amount, nonce, false);
   const sig = sign(from.sk, msg);
   if (!verify(from.pkX, from.pkY, msg, sig)) return { ok: false, note: 'BAD_SIGNATURE' }; // never happens
   return {

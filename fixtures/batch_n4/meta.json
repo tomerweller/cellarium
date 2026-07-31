@@ -1,22 +1,25 @@
 {
-  "da_commitment": "0x17cb89584c030ccb05e8e304a1ed5384918ca07e1794a506137090932883d3d3",
-  "deposit_hash": "0x1f6454197a8287b5e18bda5728f961ded3d87e2e81f8fcae826b373478823307",
+  "da_commitment": "0x1a42c7641f774b89fcf1b2e760e3e2fc3c1c4a7782e335519420d327194f9fd0",
+  "deposit_hash": "0x21cd5a7faae612e9619cf4036ab842f28762d45424647ce9cdfa56481c871c95",
   "deposits": [
     {
       "amount": 1000,
+      "asset": 0,
       "pk_x": "0x1f2cbd75183a0cced1f2b4d1121a647b3b421baed26e463b2565b7972ae1a83c"
     },
     {
       "amount": 500,
+      "asset": 1,
       "pk_x": "0x13d84dfee2bd99f26530c590cd8c011979328f1fa149234b19fea91510f94ebb"
     }
   ],
-  "new_root": "0x2f42c91985aad7b43e79305c478f9a9bc58522c2fc51ed4ab51fce88faf126be",
+  "new_root": "0x25103c7125cd9fd9b290f6f8cbd07b5d2152a304c3038b0753f5705c4af98845",
   "old_root": "0x067243231eddf4222f3911defbba7705aff06ed45960b27f6f91319196ef97e1",
-  "withdraw_hash": "0x2feba35af40cfd8774f9593d6bc43cc5c43ff0f8e682294b747f84c072fc9ac3",
+  "withdraw_hash": "0x229693a27f0237caeabc2192076b00f4719e5c5910229c5b151eae71e7041848",
   "withdrawals": [
     {
       "amount": 100,
+      "asset": 1,
       "dest": "CADQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQOBYHA4DQP5KR"
     }
   ]

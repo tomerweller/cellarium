@@ -102,14 +102,15 @@ export function friendbotUrl(address: string): string {
 }
 
 /**
- * Build, Freighter-sign, and submit a `deposit(from, l2_pk_x, amount)` call.
- * Returns the tx hash; poll status separately.
+ * Build, Freighter-sign, and submit a `deposit(from, l2_pk_x, asset, amount)`
+ * call. Returns the tx hash; poll status separately.
  */
 export async function deposit(
   params: Params,
   from: string,
   l2PkXHex: string,
-  amountStroops: bigint,
+  asset: number,
+  amountBaseUnits: bigint,
 ): Promise<string> {
   const srv = server(params);
   const account = await srv.getAccount(from);
@@ -118,7 +119,8 @@ export async function deposit(
     'deposit',
     Address.fromString(from).toScVal(),
     nativeToScVal(pkxToBytes32(l2PkXHex), { type: 'bytes' }),
-    nativeToScVal(amountStroops, { type: 'i128' }),
+    nativeToScVal(asset, { type: 'u32' }),
+    nativeToScVal(amountBaseUnits, { type: 'i128' }),
   );
   const built = new TransactionBuilder(account, {
     fee: BASE_FEE,

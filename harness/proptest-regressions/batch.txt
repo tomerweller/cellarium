@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 4b5bb779a06dedf3f4faba442265c1311abfca5e422550bbb21baf9d448b40d3 # shrinks to balance = 1000, kind = 4
+cc 221b2aa90d6383ed9edf9eb4ec11ce613ee701cad0afa1ce7d22016300982ce4 # shrinks to balance = 1000, kind = 4

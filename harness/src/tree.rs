@@ -1,6 +1,11 @@
 //! The sequencer's account tree. Must stay byte-identical to the circuit
 //! (circuits/lib/src/{merkle,account}.nr) and the contract's view of roots —
 //! shared test vectors are pinned in both test suites.
+//!
+//! Multi-asset (PLAN.md 1.1): each account holds a cash balance (asset 0,
+//! XLM stroops) and a collateral balance (asset 1, tUST base units):
+//!   bal_hash = Poseidon2([cash, coll], 2)
+//!   leaf     = Poseidon2([DOMAIN_LEAF, pk_x, bal_hash, nonce], 4)
 
 use crate::poseidon::{fr_from_u64, Fr, Hasher, FR_ZERO};
 use serde::{Deserialize, Serialize};
@@ -9,11 +14,46 @@ pub const DEPTH: usize = 8;
 pub const N_LEAVES: usize = 1 << DEPTH;
 pub const DOMAIN_LEAF: u64 = 1;
 
+/// Asset ids (PLAN.md 1.2): 0 = cash (XLM), 1 = collateral (tUST).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[repr(u32)]
+pub enum Asset {
+    Cash = 0,
+    Coll = 1,
+}
+
+impl Asset {
+    pub fn from_u32(v: u32) -> Option<Asset> {
+        match v {
+            0 => Some(Asset::Cash),
+            1 => Some(Asset::Coll),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Account {
     pub pk_x: Fr,
-    pub balance: u64,
+    pub cash: u64,
+    pub coll: u64,
     pub nonce: u64,
+}
+
+impl Account {
+    pub fn balance(&self, asset: Asset) -> u64 {
+        match asset {
+            Asset::Cash => self.cash,
+            Asset::Coll => self.coll,
+        }
+    }
+
+    pub fn balance_mut(&mut self, asset: Asset) -> &mut u64 {
+        match asset {
+            Asset::Cash => &mut self.cash,
+            Asset::Coll => &mut self.coll,
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Default, Debug)]
@@ -27,13 +67,17 @@ impl Tree {
         Self::default()
     }
 
+    pub fn bal_hash(hasher: &Hasher, cash: u64, coll: u64) -> Fr {
+        hasher.hash2(fr_from_u64(cash), fr_from_u64(coll))
+    }
+
     pub fn leaf_value(hasher: &Hasher, account: Option<&Account>) -> Fr {
         match account {
             None => FR_ZERO,
             Some(a) => hasher.hash(&[
                 fr_from_u64(DOMAIN_LEAF),
                 a.pk_x,
-                fr_from_u64(a.balance),
+                Self::bal_hash(hasher, a.cash, a.coll),
                 fr_from_u64(a.nonce),
             ]),
         }
@@ -121,7 +165,8 @@ mod tests {
             5,
             Account {
                 pk_x: fr_from_u64(1234),
-                balance: 100,
+                cash: 100,
+                coll: 40,
                 nonce: 0,
             },
         );

@@ -5,7 +5,10 @@ pub struct Config {
     pub rpc_url: String,
     pub network_passphrase: String,
     pub contract_id: String,
+    /// Cash (XLM) custody token contract.
     pub token_id: String,
+    /// Collateral (tUST) custody token contract.
+    pub tust_id: String,
     /// S... secret key of the sequencer's Stellar account (pays batch fees).
     pub sequencer_secret: String,
     /// G... public address (optional; derived from an identity if absent).
@@ -44,6 +47,7 @@ impl Config {
             network_passphrase: var_or("NETWORK_PASSPHRASE", "Test SDF Network ; September 2015"),
             contract_id: var("CONTRACT_ID")?,
             token_id: var("TOKEN_ID")?,
+            tust_id: var("TUST_ID")?,
             sequencer_secret: var("SEQUENCER_SECRET")?,
             sequencer_address: std::env::var("SEQUENCER_ADDRESS").ok(),
             db_path: PathBuf::from(var_or("DB_PATH", "sequencer.db")),

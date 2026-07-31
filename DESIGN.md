@@ -1,8 +1,19 @@
 # Soribium — Design Spec
 
-Soribium is a payments ZK-rollup operating as a **validium** on Stellar
-testnet: batch transaction data lives off-chain (served by the sequencer's DA
-endpoint) and is bound on-chain by a proven commitment.
+Soribium is a multi-asset ZK-rollup operating as a **validium** on Stellar
+testnet — being extended into a private bilateral repo venue (PLAN.md): batch
+transaction data lives off-chain (served by the sequencer's DA endpoint) and
+is bound on-chain by a proven commitment.
+
+**Assets** (ids used in hashes as Field, in envelopes as u32):
+
+| Asset id | Leg | Token | Base unit |
+|---|---|---|---|
+| 0 | cash | native XLM SAC | stroop |
+| 1 | collateral | mock tUST (contracts/tust, pure Soroban SEP-41) | 1e-7 tUST |
+
+Each custody token's total supply must be ≤ u64::MAX base units (XLM
+natively; tUST enforces the cap in its mint).
 
 Single source of truth for hash layouts, domains, and message formats shared by
 the Noir circuits, the Soroban contract, and the Rust harness. If a constant
@@ -35,31 +46,38 @@ Domain separators (Fr constants):
 | `DOMAIN_LEAF` | 1 | account leaf hash |
 | `DOMAIN_TX` | 2 | L2 transaction signing message |
 | `DOMAIN_SIG` | 3 | Schnorr challenge |
-| `DOMAIN_DEP` | 4 | deposit-list fold |
-| `DOMAIN_WD` | 5 | withdrawal-list fold |
+| `DOMAIN_DEP` | 4 | *(retired in M1; replaced by DOMAIN_DEP2)* |
+| `DOMAIN_WD` | 5 | *(retired in M1; replaced by DOMAIN_WD2)* |
 | `DOMAIN_ADDR` | 6 | address_to_field |
 | `DOMAIN_DA` | 7 | DA-blob commitment fold (validium) |
+| `DOMAIN_DEP2` | 11 | deposit fold, asset-bound (M1) |
+| `DOMAIN_WD2` | 12 | withdrawal fold, asset-bound (M1) |
 
 ## State tree
 
 - Fixed depth **8** (256 accounts), parameterized in circuits and harness.
-- Leaf = `Poseidon2([DOMAIN_LEAF, pk_x, balance, nonce])`.
+- `bal_hash = Poseidon2([cash, coll])` — cash in stroops, coll in tUST base
+  units, both range-constrained to u64 in-circuit.
+- Leaf = `Poseidon2([DOMAIN_LEAF, pk_x, bal_hash, nonce])`.
 - Node = `Poseidon2([left, right])`.
 - Empty: `zero[0] = 0`, `zero[i+1] = Poseidon2([zero[i], zero[i]])`; empty leaf = 0.
 - Account key: Grumpkin public-key x-coordinate (`pk_x`). Active spends require
   **even-y** public keys (`pk_y` LSB clear): keygen flips `sk → -sk` when the
   raw point has odd y (harness `Keypair::from_sk`, wallet `canonicalizeSk`).
   This binds y-parity for spend authorization without enlarging the leaf.
-- Balance range `[0, 2^64)` enforced in-circuit; `i128` on-chain. Overflow of
-  an L2 balance (an unprovable FIFO queue head) is prevented by a **deployment
-  invariant** rather than per-key tracking: the custody token's total supply
-  must be ≤ `u64::MAX` base units (native XLM: ~1.05e18 stroops, ~17× under).
-  The circuit conserves value, so every balance ≤ escrow ≤ supply.
+- Balance range `[0, 2^64)` enforced in-circuit per asset; `i128` on-chain.
+  Overflow of an L2 balance (an unprovable FIFO queue head) is prevented by a
+  **deployment invariant** rather than per-key tracking: each custody token's
+  total supply must be ≤ `u64::MAX` base units (native XLM: ~1.05e18 stroops,
+  ~17× under; tUST enforces the cap in mint). The circuit conserves value per
+  asset, so every balance ≤ escrow ≤ supply.
 
 ## L2 transaction
 
-Signing message: `msg = Poseidon2([DOMAIN_TX, from_pk_x, to_field, amount, nonce, is_withdraw])`
-where `to_field` = recipient `pk_x` (transfer) or `address_to_field(dest)` (withdrawal).
+Signing message (asset-bound since M1):
+`msg = Poseidon2([DOMAIN_TX, from_pk_x, to_field, asset, amount, nonce, is_withdraw])`
+where `to_field` = recipient `pk_x` (transfer) or `address_to_field(dest)`
+(withdrawal), and `asset` selects which of the two balances moves.
 
 Schnorr over Grumpkin (hand-rolled; std::schnorr no longer exists):
 - keys: `pk = sk·G` (G = Grumpkin generator via `fixed_base_scalar_mul`), even-y
@@ -87,12 +105,14 @@ Exactly 5 public inputs (160-byte PI blob):
 
 - `old_root` — contract storage.
 - `new_root` — envelope, becomes storage after verification.
-- `deposit_hash` — fold over the batch's FIFO deposit-queue prefix:
-  `acc' = Poseidon2([DOMAIN_DEP, acc, pk_x, amount])`, `acc₀ = 0`; the envelope
-  pins `deposit_count` and the contract recomputes over exactly that prefix
-  (queue-race prevention).
-- `withdraw_hash` — same fold shape with `DOMAIN_WD` over
-  `(address_to_field(dest), amount)` pairs from the envelope.
+- `deposit_hash` — fold over the batch's FIFO deposit-queue prefixes, **cash
+  queue first, then coll queue** (two on-chain queues since M1):
+  `acc' = Poseidon2([DOMAIN_DEP2, acc, Poseidon2([pk_x, asset, amount])])`,
+  `acc₀ = 0`; the envelope pins `(deposit_count_cash, deposit_count_coll)` and
+  the contract recomputes over exactly those prefixes (queue-race prevention).
+- `withdraw_hash` — same fold shape with `DOMAIN_WD2` over
+  `Poseidon2([address_to_field(dest), asset, amount])` entries from the
+  envelope.
 - `da_commitment` — fold over each **active** tx's signing message, in order:
   `acc' = Poseidon2([DOMAIN_DA, acc, tx_msg])` (3-input), `acc₀ = 0`. The
   message already binds `(from_pk_x, to_field, amount, nonce, is_withdraw)` —
@@ -110,7 +130,10 @@ accumulators. Active entries require `amount > 0`.
 
 ## Envelope (submit_batch argument)
 
-`{ new_root: BytesN<32>, deposit_count: u32, withdrawals: Vec<Withdrawal>, da_commitment: BytesN<32>, proof: Bytes }`
+`{ new_root: BytesN<32>, deposit_count_cash: u32, deposit_count_coll: u32, withdrawals: Vec<Withdrawal>, da_commitment: BytesN<32>, proof: Bytes }`
+
+`Withdrawal = { dest: Address, asset: u32, amount: i128 }`; payouts draw from
+the matching custody token.
 
 - The tx blob itself never touches the chain (validium): it is stored in the
   sequencer's SQLite and served at `GET /da/:batch_num`, bound by

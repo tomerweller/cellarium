@@ -10,7 +10,7 @@
 use crate::batch::{build_batch, tx_message, BatchWitness, DepositRequest, SignedTx};
 use crate::keys::{coord_to_fr, sign_with_nonce, Keypair, Signature};
 use crate::poseidon::{fr_from_u64, to_hex, Fr, Hasher, FR_ZERO};
-use crate::tree::{Account, Tree, DEPTH, DOMAIN_LEAF};
+use crate::tree::{Account, Asset, Tree, DEPTH, DOMAIN_LEAF};
 use ark_grumpkin::{Fq as Coord, Fr as Scalar};
 use std::fmt::Write as _;
 
@@ -34,37 +34,47 @@ fn sig_lit(sig: &Signature) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn tx_lit(
-    from: (&Fr, &Fr, u32, u64, u64, &[Fr; DEPTH]),
+    from: (&Fr, &Fr, u32, u64, u64, u64, &[Fr; DEPTH]),
     to_field: &Fr,
-    to: (u32, &Fr, u64, &[Fr; DEPTH]),
+    to: (u32, &Fr, u64, u64, &[Fr; DEPTH]),
+    asset: Asset,
     amount: u64,
     is_withdraw: bool,
     is_active: bool,
     sig: &Signature,
 ) -> String {
     format!(
-        "TxWitness {{\n        from_pk_x: {}, from_pk_y: {}, from_index: {}, from_balance: {}, from_nonce: {},\n        from_siblings: {},\n        to_field: {}, to_index: {}, to_balance: {}, to_nonce: {},\n        to_siblings: {},\n        amount: {}, is_withdraw: {}, is_active: {},\n        sig: {},\n    }}",
-        to_hex(from.0), to_hex(from.1), from.2, from.3, from.4, sibs(from.5),
-        to_hex(to_field), to.0, to_hex(to.1), to.2, sibs(to.3),
-        amount, is_withdraw as u8, is_active as u8, sig_lit(sig)
+        "TxWitness {{\n        from_pk_x: {}, from_pk_y: {}, from_index: {}, from_cash: {}, from_coll: {}, from_nonce: {},\n        from_siblings: {},\n        to_field: {}, to_index: {}, to_cash: {}, to_coll: {}, to_nonce: {},\n        to_siblings: {},\n        asset: {}, amount: {}, is_withdraw: {}, is_active: {},\n        sig: {},\n    }}",
+        to_hex(from.0), to_hex(from.1), from.2, from.3, from.4, from.5, sibs(from.6),
+        to_hex(to_field), to.0, to_hex(to.1), to.2, to.3, sibs(to.4),
+        asset as u32, amount, is_withdraw as u8, is_active as u8, sig_lit(sig)
     )
 }
 
-fn dep_lit(pk_x: &Fr, amount: u64, index: u32, old: (&Fr, u64, u64), siblings: &[Fr; DEPTH], is_active: bool) -> String {
+fn dep_lit(
+    pk_x: &Fr,
+    asset: Asset,
+    amount: u64,
+    index: u32,
+    old: (&Fr, u64, u64, u64),
+    siblings: &[Fr; DEPTH],
+    is_active: bool,
+) -> String {
     format!(
-        "DepositWitness {{\n        pk_x: {}, amount: {}, index: {}, old_pk_x: {}, old_balance: {}, old_nonce: {},\n        siblings: {},\n        is_active: {},\n    }}",
-        to_hex(pk_x), amount, index, to_hex(old.0), old.1, old.2, sibs(siblings), is_active as u8
+        "DepositWitness {{\n        pk_x: {}, asset: {}, amount: {}, index: {}, old_pk_x: {}, old_cash: {}, old_coll: {}, old_nonce: {},\n        siblings: {},\n        is_active: {},\n    }}",
+        to_hex(pk_x), asset as u32, amount, index, to_hex(old.0), old.1, old.2, old.3, sibs(siblings), is_active as u8
     )
 }
 
-fn leaf(hasher: &Hasher, pk_x: &Fr, balance: &Fr, nonce: u64) -> Fr {
-    hasher.hash(&[fr_from_u64(DOMAIN_LEAF), *pk_x, *balance, fr_from_u64(nonce)])
+fn leaf(hasher: &Hasher, pk_x: &Fr, cash: &Fr, coll: u64, nonce: u64) -> Fr {
+    let bal = hasher.hash2(*cash, fr_from_u64(coll));
+    hasher.hash(&[fr_from_u64(DOMAIN_LEAF), *pk_x, bal, fr_from_u64(nonce)])
 }
 
-/// A signed withdrawal witness against a tree whose ONLY account sits at
+/// A signed cash withdrawal witness against a tree whose ONLY account sits at
 /// index 0 — the to-slot identity update then targets slot 0, whose sibling
 /// path is unchanged by the debit (the debited leaf is the running node, not
-/// a sibling). `post_debit_balance` is a raw field so overdraft wraparound
+/// a sibling). `post_debit_cash` is a raw field so overdraft wraparound
 /// can be represented.
 struct SoloWithdraw {
     root: Fr,
@@ -72,10 +82,17 @@ struct SoloWithdraw {
     post_debit_leaf: Fr,
 }
 
-fn solo_withdraw(hasher: &Hasher, tree: &Tree, pk_x: &Fr, post_debit_balance: Coord, new_nonce: u64) -> SoloWithdraw {
+fn solo_withdraw(
+    hasher: &Hasher,
+    tree: &Tree,
+    pk_x: &Fr,
+    post_debit_cash: Coord,
+    coll: u64,
+    new_nonce: u64,
+) -> SoloWithdraw {
     let root = tree.root(hasher);
     let (from_siblings, _) = tree.path(hasher, 0);
-    let post = leaf(hasher, pk_x, &coord_to_fr(&post_debit_balance), new_nonce);
+    let post = leaf(hasher, pk_x, &coord_to_fr(&post_debit_cash), coll, new_nonce);
     SoloWithdraw { root, from_siblings, post_debit_leaf: post }
 }
 
@@ -93,16 +110,19 @@ pub fn emit() -> String {
     writeln!(out, "use crate::schnorr::Signature;").unwrap();
     writeln!(out, "use crate::tx::{{DepositWitness, TxWitness}};\n").unwrap();
 
-    // --- Scenario A: full batch<2,2> (2 deposits, transfer + withdrawal) ---
+    // --- Scenario A: full batch<2,2> exercising BOTH assets:
+    // alice deposits 1_000_000 cash, bob deposits 500_000 coll, alice->bob
+    // cash transfer 250_000, bob coll withdrawal 100_000.
     let mut tree = Tree::new();
     let t1_msg_nonce = Scalar::from(1001u64);
     let t2_msg_nonce = Scalar::from(1002u64);
     let t1 = {
-        let msg = tx_message(&hasher, alice.pk_x(), bob.pk_x(), 250_000, 0, false);
+        let msg = tx_message(&hasher, alice.pk_x(), bob.pk_x(), Asset::Cash, 250_000, 0, false);
         SignedTx {
             from_pk_x: alice.pk_x(),
             from_pk_y: alice.pk_y(),
             to_field: bob.pk_x(),
+            asset: Asset::Cash,
             amount: 250_000,
             nonce: 0,
             is_withdraw: false,
@@ -110,11 +130,12 @@ pub fn emit() -> String {
         }
     };
     let t2 = {
-        let msg = tx_message(&hasher, bob.pk_x(), wd_field, 100_000, 0, true);
+        let msg = tx_message(&hasher, bob.pk_x(), wd_field, Asset::Coll, 100_000, 0, true);
         SignedTx {
             from_pk_x: bob.pk_x(),
             from_pk_y: bob.pk_y(),
             to_field: wd_field,
+            asset: Asset::Coll,
             amount: 100_000,
             nonce: 0,
             is_withdraw: true,
@@ -127,16 +148,16 @@ pub fn emit() -> String {
         2,
         2,
         &[
-            DepositRequest { pk_x: alice.pk_x(), amount: 1_000_000 },
-            DepositRequest { pk_x: bob.pk_x(), amount: 500_000 },
+            DepositRequest { pk_x: alice.pk_x(), asset: Asset::Cash, amount: 1_000_000 },
+            DepositRequest { pk_x: bob.pk_x(), asset: Asset::Coll, amount: 500_000 },
         ],
         &[t1, t2],
     )
     .expect("scenario A must build");
 
-    writeln!(out, "/// Scenario A: deposits alice 1_000_000 + bob 500_000, then alice->bob").unwrap();
-    writeln!(out, "/// transfer 250_000 and bob withdrawal 100_000. Returns the five public").unwrap();
-    writeln!(out, "/// inputs then the witness arrays.").unwrap();
+    writeln!(out, "/// Scenario A (both assets): deposits alice 1_000_000 cash + bob 500_000 coll,").unwrap();
+    writeln!(out, "/// then alice->bob cash transfer 250_000 and bob coll withdrawal 100_000.").unwrap();
+    writeln!(out, "/// Returns the five public inputs then the witness arrays.").unwrap();
     writeln!(
         out,
         "pub fn batch_a() -> ([Field; 5], [DepositWitness; 2], [TxWitness; 2]) {{\n    let pis = [{}, {}, {}, {}, {}];",
@@ -150,7 +171,17 @@ pub fn emit() -> String {
     let deps: Vec<String> = w
         .deposits
         .iter()
-        .map(|d| dep_lit(&d.pk_x, d.amount, d.index, (&d.old_pk_x, d.old_balance, d.old_nonce), &d.siblings, d.is_active))
+        .map(|d| {
+            dep_lit(
+                &d.pk_x,
+                d.asset,
+                d.amount,
+                d.index,
+                (&d.old_pk_x, d.old_cash, d.old_coll, d.old_nonce),
+                &d.siblings,
+                d.is_active,
+            )
+        })
         .collect();
     writeln!(out, "    let deps = [{}];", deps.join(", ")).unwrap();
     let txs: Vec<String> = w
@@ -158,9 +189,10 @@ pub fn emit() -> String {
         .iter()
         .map(|t| {
             tx_lit(
-                (&t.from_pk_x, &t.from_pk_y, t.from_index, t.from_balance, t.from_nonce, &t.from_siblings),
+                (&t.from_pk_x, &t.from_pk_y, t.from_index, t.from_cash, t.from_coll, t.from_nonce, &t.from_siblings),
                 &t.to_field,
-                (t.to_index, &t.to_balance_or_leaf, t.to_nonce, &t.to_siblings),
+                (t.to_index, &t.to_cash_or_leaf, t.to_coll, t.to_nonce, &t.to_siblings),
+                t.asset,
                 t.amount,
                 t.is_withdraw,
                 t.is_active,
@@ -173,32 +205,34 @@ pub fn emit() -> String {
 
     // --- Solo-tree adversarial withdrawals (account at index 0) ---
     // Helper closure: emit `pub fn NAME() -> (Field, TxWitness)` for a signed
-    // withdrawal by `kp` from a solo tree with `balance`, witness fields
-    // possibly diverging from what was signed.
+    // CASH withdrawal by `kp` from a solo tree with (cash, coll), witness
+    // fields possibly diverging from what was signed.
     let mut solo_case = |name: &str,
                          doc: &str,
                          kp: &Keypair,
-                         balance: u64,
+                         cash: u64,
+                         coll: u64,
                          signed_amount: u64,
                          witness_amount: u64,
                          signed_nonce: u64,
                          witness_nonce: u64,
                          k: u64| {
         let mut t = Tree::new();
-        t.set(0, Account { pk_x: kp.pk_x(), balance, nonce: 0 });
-        // Post-debit balance in the field (may wrap on overdraft).
-        let post = Coord::from(balance) - Coord::from(witness_amount);
-        let sw = solo_withdraw(&hasher, &t, &kp.pk_x(), post, witness_nonce + 1);
-        let msg = tx_message(&hasher, kp.pk_x(), wd_field, signed_amount, signed_nonce, true);
+        t.set(0, Account { pk_x: kp.pk_x(), cash, coll, nonce: 0 });
+        // Post-debit cash in the field (may wrap on overdraft).
+        let post = Coord::from(cash) - Coord::from(witness_amount);
+        let sw = solo_withdraw(&hasher, &t, &kp.pk_x(), post, coll, witness_nonce + 1);
+        let msg = tx_message(&hasher, kp.pk_x(), wd_field, Asset::Cash, signed_amount, signed_nonce, true);
         let sig = sign_with_nonce(&hasher, kp, msg, Scalar::from(k));
         writeln!(out, "/// {doc}").unwrap();
         writeln!(
             out,
             "pub fn {name}() -> (Field, TxWitness) {{\n    let w = {};\n    ({}, w)\n}}\n",
             tx_lit(
-                (&kp.pk_x(), &kp.pk_y(), 0, balance, witness_nonce, &sw.from_siblings),
+                (&kp.pk_x(), &kp.pk_y(), 0, cash, coll, witness_nonce, &sw.from_siblings),
                 &wd_field,
-                (0, &sw.post_debit_leaf, 0, &sw.from_siblings),
+                (0, &sw.post_debit_leaf, 0, 0, &sw.from_siblings),
+                Asset::Cash,
                 witness_amount,
                 true,
                 true,
@@ -211,23 +245,23 @@ pub fn emit() -> String {
 
     solo_case(
         "overdraft",
-        "Signed overdraft: amount 2_000_000 > balance 1_000_000. Sig is VALID; only the 64-bit range check on the debited balance can reject it.",
-        &alice, 1_000_000, 2_000_000, 2_000_000, 0, 0, 2002,
+        "Signed overdraft: amount 2_000_000 > cash 1_000_000. Sig is VALID; only the 64-bit range check on the debited balance can reject it.",
+        &alice, 1_000_000, 5, 2_000_000, 2_000_000, 0, 0, 2002,
     );
     solo_case(
         "amount_not_signed",
         "Witness amount 200_000 differs from the signed 100_000: the in-circuit message must diverge and the signature check must fail (sig binds amount).",
-        &alice, 1_000_000, 100_000, 200_000, 0, 0, 3003,
+        &alice, 1_000_000, 5, 100_000, 200_000, 0, 0, 3003,
     );
     solo_case(
         "zero_amount",
-        "Signed zero-amount spend (free nonce burn). Sig valid; only the amount != 0 guard rejects.",
-        &alice, 1_000_000, 0, 0, 0, 0, 5005,
+        "Zero-amount spend, correctly signed: only the amount != 0 guard rejects (nonce burn / griefing prevention).",
+        &alice, 1_000_000, 5, 0, 0, 0, 0, 5005,
     );
     solo_case(
         "future_nonce",
-        "Signed for nonce 1 while the tree holds nonce 0: witness self-consistent (sig verifies) but the sender inclusion proof must fail - replay/skip protection via root binding.",
-        &alice, 1_000_000, 100_000, 100_000, 1, 1, 6006,
+        "Signed with nonce 1 while the account is at nonce 0: the witness carries the SIGNED nonce, so inclusion of the pre-state must fail.",
+        &alice, 1_000_000, 5, 100_000, 100_000, 1, 1, 6006,
     );
 
     // Negated padding key: same x as PAD_PK_X but even y - the blacklist must
@@ -237,7 +271,7 @@ pub fn emit() -> String {
     solo_case(
         "pad_spend",
         "Spend by the (public) padding key, negated to even-y so signature AND parity checks pass: only the PAD_PK_X blacklist can reject it.",
-        &pad_neg, 1_000_000, 100_000, 100_000, 0, 0, 4004,
+        &pad_neg, 1_000_000, 0, 100_000, 100_000, 0, 0, 4004,
     );
 
     // Odd-y sender: raw keypair whose pk has odd y (not canonicalized).
@@ -251,32 +285,62 @@ pub fn emit() -> String {
     solo_case(
         "odd_y_sender",
         "Sender pk with odd y (non-canonical). Signature is valid over it; only the is_even_y gate rejects.",
-        &odd, 1_000_000, 100_000, 100_000, 0, 0, 7007,
+        &odd, 1_000_000, 0, 100_000, 100_000, 0, 0, 7007,
     );
+
+    // Wrong-asset witness: signed as a COLL withdrawal but the witness claims
+    // CASH — the in-circuit message diverges, so the signature must fail.
+    {
+        let mut t = Tree::new();
+        t.set(0, Account { pk_x: alice.pk_x(), cash: 1_000_000, coll: 1_000_000, nonce: 0 });
+        let post = Coord::from(1_000_000u64) - Coord::from(100_000u64);
+        let sw = solo_withdraw(&hasher, &t, &alice.pk_x(), post, 1_000_000, 1);
+        let msg = tx_message(&hasher, alice.pk_x(), wd_field, Asset::Coll, 100_000, 0, true);
+        let sig = sign_with_nonce(&hasher, &alice, msg, Scalar::from(9009u64));
+        writeln!(out, "/// Signed as a COLL withdrawal; witness flips the asset to CASH (both").unwrap();
+        writeln!(out, "/// balances are ample, so only the signature binding the asset rejects).").unwrap();
+        writeln!(
+            out,
+            "pub fn asset_not_signed() -> (Field, TxWitness) {{\n    let w = {};\n    ({}, w)\n}}\n",
+            tx_lit(
+                (&alice.pk_x(), &alice.pk_y(), 0, 1_000_000, 1_000_000, 0, &sw.from_siblings),
+                &wd_field,
+                (0, &sw.post_debit_leaf, 0, 0, &sw.from_siblings),
+                Asset::Cash,
+                100_000,
+                true,
+                true,
+                &sig,
+            ),
+            to_hex(&sw.root)
+        )
+        .unwrap();
+    }
 
     // --- Transfer to the padding account (corrupt tree contains PAD) ---
     {
         let mut t = Tree::new();
         let pad = Keypair::from_sk_raw(Scalar::from(7u64));
-        t.set(0, Account { pk_x: alice.pk_x(), balance: 1_000_000, nonce: 0 });
-        t.set(1, Account { pk_x: pad.pk_x(), balance: 7, nonce: 0 });
+        t.set(0, Account { pk_x: alice.pk_x(), cash: 1_000_000, coll: 0, nonce: 0 });
+        t.set(1, Account { pk_x: pad.pk_x(), cash: 7, coll: 0, nonce: 0 });
         let root = t.root(&hasher);
         let (from_sibs, _) = t.path(&hasher, 0);
-        let msg = tx_message(&hasher, alice.pk_x(), pad.pk_x(), 100_000, 0, false);
+        let msg = tx_message(&hasher, alice.pk_x(), pad.pk_x(), Asset::Cash, 100_000, 0, false);
         let sig = sign_with_nonce(&hasher, &alice, msg, Scalar::from(8008u64));
         // Recipient witness against the post-debit tree.
-        t.set(0, Account { pk_x: alice.pk_x(), balance: 900_000, nonce: 1 });
+        t.set(0, Account { pk_x: alice.pk_x(), cash: 900_000, coll: 0, nonce: 1 });
         let (to_sibs, _) = t.path(&hasher, 1);
         writeln!(out, "/// Transfer TO the padding account (tree corruptly contains PAD at index 1").unwrap();
-        writeln!(out, "/// with balance 7). All proofs and the signature are valid; only the").unwrap();
+        writeln!(out, "/// with cash 7). All proofs and the signature are valid; only the").unwrap();
         writeln!(out, "/// to_field != PAD_PK_X guard rejects.").unwrap();
         writeln!(
             out,
             "pub fn transfer_to_pad() -> (Field, TxWitness) {{\n    let w = {};\n    ({}, w)\n}}\n",
             tx_lit(
-                (&alice.pk_x(), &alice.pk_y(), 0, 1_000_000, 0, &from_sibs),
+                (&alice.pk_x(), &alice.pk_y(), 0, 1_000_000, 0, 0, &from_sibs),
                 &pad.pk_x(),
-                (1, &fr_from_u64(7), 0, &to_sibs),
+                (1, &fr_from_u64(7), 0, 0, &to_sibs),
+                Asset::Cash,
                 100_000,
                 false,
                 true,
@@ -293,19 +357,19 @@ pub fn emit() -> String {
         let t = Tree::new();
         let root = t.root(&hasher);
         let (sibs0, _) = t.path(&hasher, 0);
-        writeln!(out, "/// Deposit init on an empty slot claiming a nonzero prior balance (ghost").unwrap();
-        writeln!(out, "/// state). Must be rejected (empty-slot pinning + inclusion).").unwrap();
+        writeln!(out, "/// Deposit init on an empty slot claiming a nonzero prior cash balance").unwrap();
+        writeln!(out, "/// (ghost state). Must be rejected (empty-slot pinning + inclusion).").unwrap();
         writeln!(
             out,
             "pub fn ghost_deposit() -> (Field, DepositWitness) {{\n    let w = {};\n    ({}, w)\n}}\n",
-            dep_lit(&alice.pk_x(), 100, 0, (&FR_ZERO, 5, 0), &sibs0, true),
+            dep_lit(&alice.pk_x(), Asset::Cash, 100, 0, (&FR_ZERO, 5, 0, 0), &sibs0, true),
             to_hex(&root)
         )
         .unwrap();
 
         // pk mismatch on an occupied slot.
         let mut t = Tree::new();
-        t.set(0, Account { pk_x: bob.pk_x(), balance: 500_000, nonce: 0 });
+        t.set(0, Account { pk_x: bob.pk_x(), cash: 500_000, coll: 0, nonce: 0 });
         let root = t.root(&hasher);
         let (sibs0, _) = t.path(&hasher, 0);
         writeln!(out, "/// Deposit into bob's occupied slot claiming alice's pk. Inclusion of the").unwrap();
@@ -313,22 +377,22 @@ pub fn emit() -> String {
         writeln!(
             out,
             "pub fn deposit_pk_mismatch() -> (Field, DepositWitness) {{\n    let w = {};\n    ({}, w)\n}}\n",
-            dep_lit(&alice.pk_x(), 100, 0, (&bob.pk_x(), 500_000, 0), &sibs0, true),
+            dep_lit(&alice.pk_x(), Asset::Cash, 100, 0, (&bob.pk_x(), 500_000, 0, 0), &sibs0, true),
             to_hex(&root)
         )
         .unwrap();
 
-        // Balance overflow past u64.
+        // Balance overflow past u64 (coll leg).
         let mut t = Tree::new();
-        t.set(0, Account { pk_x: alice.pk_x(), balance: u64::MAX - 10, nonce: 0 });
+        t.set(0, Account { pk_x: alice.pk_x(), cash: 3, coll: u64::MAX - 10, nonce: 0 });
         let root = t.root(&hasher);
         let (sibs0, _) = t.path(&hasher, 0);
-        writeln!(out, "/// Deposit pushing the balance past u64::MAX. Everything valid except the").unwrap();
-        writeln!(out, "/// 64-bit range check on the credited balance.").unwrap();
+        writeln!(out, "/// Deposit pushing the coll balance past u64::MAX. Everything valid except").unwrap();
+        writeln!(out, "/// the 64-bit range check on the credited balance.").unwrap();
         writeln!(
             out,
             "pub fn deposit_overflow() -> (Field, DepositWitness) {{\n    let w = {};\n    ({}, w)\n}}\n",
-            dep_lit(&alice.pk_x(), 100, 0, (&alice.pk_x(), u64::MAX - 10, 0), &sibs0, true),
+            dep_lit(&alice.pk_x(), Asset::Coll, 100, 0, (&alice.pk_x(), 3, u64::MAX - 10, 0), &sibs0, true),
             to_hex(&root)
         )
         .unwrap();
@@ -337,21 +401,22 @@ pub fn emit() -> String {
     // --- Inactive (padding) entries: identity property fixtures ---
     {
         let mut t = Tree::new();
-        t.set(0, Account { pk_x: alice.pk_x(), balance: 1_000_000, nonce: 0 });
+        t.set(0, Account { pk_x: alice.pk_x(), cash: 1_000_000, coll: 9, nonce: 0 });
         let root = t.root(&hasher);
         let (sibs0, _) = t.path(&hasher, 0);
-        let slot0_leaf = leaf(&hasher, &alice.pk_x(), &fr_from_u64(1_000_000), 0);
+        let slot0_leaf = leaf(&hasher, &alice.pk_x(), &fr_from_u64(1_000_000), 9, 0);
         let pad_sig = crate::keys::pad_signature(&hasher);
         writeln!(out, "/// Padding entries over a tree with alice at slot 0: inactive deposit and").unwrap();
         writeln!(out, "/// inactive tx (PAD signature). apply_* must leave root and folds unchanged.").unwrap();
         writeln!(
             out,
             "pub fn inactive_entries() -> (Field, DepositWitness, TxWitness) {{\n    let d = {};\n    let t = {};\n    ({}, d, t)\n}}\n",
-            dep_lit(&FR_ZERO, 0, 0, (&alice.pk_x(), 1_000_000, 0), &sibs0, false),
+            dep_lit(&FR_ZERO, Asset::Cash, 0, 0, (&alice.pk_x(), 1_000_000, 9, 0), &sibs0, false),
             tx_lit(
-                (&alice.pk_x(), &FR_ZERO, 0, 1_000_000, 0, &sibs0),
+                (&alice.pk_x(), &FR_ZERO, 0, 1_000_000, 9, 0, &sibs0),
                 &FR_ZERO,
-                (0, &slot0_leaf, 0, &sibs0),
+                (0, &slot0_leaf, 0, 0, &sibs0),
+                Asset::Cash,
                 0,
                 false,
                 false,

@@ -42,7 +42,7 @@ export function ConstraintSandbox() {
       });
     },
     replay: () => {
-      const msg = txMessage(alice.pkX, bob.pkX, 5_000_000n, 0n, false);
+      const msg = txMessage(alice.pkX, bob.pkX, 0n, 5_000_000n, 0n, false);
       setResult({
         attack: 'Replay (resubmit the nonce-0 payment after it settled)',
         constraint: 'nonce',
@@ -50,7 +50,7 @@ export function ConstraintSandbox() {
       });
     },
     forge: () => {
-      const msg = txMessage(alice.pkX, bob.pkX, 5_000_000n, 0n, false);
+      const msg = txMessage(alice.pkX, bob.pkX, 0n, 5_000_000n, 0n, false);
       const sig = sign(bob.sk, msg); // bob signs for alice
       const ok = verify(alice.pkX, alice.pkY, msg, sig);
       setResult({
@@ -63,7 +63,7 @@ export function ConstraintSandbox() {
       // Claim alice has 1000 XLM: recompute her leaf with the fat balance and
       // walk her honest path — the root that comes out isn't the real root.
       const { siblings } = demoPath(levels, alice.index);
-      const fatLeaf = leafValue(alice.pkX, 10_000_000_000n, alice.nonce);
+      const fatLeaf = leafValue(alice.pkX, 10_000_000_000n, 0n, alice.nonce);
       const fakeRoot = rootFromPath(fatLeaf, alice.index, siblings);
       setResult({
         attack: 'Fake balance (claim alice holds 1,000 XLM)',

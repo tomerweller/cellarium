@@ -10,9 +10,9 @@
 use soroban_poseidon::poseidon2_hash;
 use soroban_sdk::{crypto::BnScalar, Address, Bytes, BytesN, Env, U256, Vec as SVec};
 
-pub const DOMAIN_DEP: u32 = 4;
-pub const DOMAIN_WD: u32 = 5;
 pub const DOMAIN_ADDR: u32 = 6;
+pub const DOMAIN_DEP2: u32 = 11;
+pub const DOMAIN_WD2: u32 = 12;
 
 /// BN254 scalar field modulus r, big-endian.
 const BN254_R: [u8; 32] = [
@@ -44,25 +44,33 @@ fn word_from_u256(env: &Env, v: &U256) -> BytesN<32> {
     BytesN::from_array(env, &arr)
 }
 
-fn poseidon4(env: &Env, a: U256, b: U256, c: U256, d: U256) -> U256 {
+fn poseidon3(env: &Env, a: U256, b: U256, c: U256) -> U256 {
     let mut inputs: SVec<U256> = SVec::new(env);
     inputs.push_back(a);
     inputs.push_back(b);
     inputs.push_back(c);
-    inputs.push_back(d);
     poseidon2_hash::<4, BnScalar>(env, &inputs)
 }
 
-/// One fold step: acc' = Poseidon2([domain, acc, a, b]). `amount` must
-/// already be validated < 2^64 (deposit()/submit_batch() enforce it).
-pub fn fold(env: &Env, domain: u32, acc: &BytesN<32>, a: &BytesN<32>, amount: i128) -> BytesN<32> {
-    let out = poseidon4(
+/// One asset-aware fold step (deposit and withdrawal lists, DESIGN.md):
+/// acc' = Poseidon2([domain, acc, Poseidon2([a, asset, amount], 3)], 3).
+/// `amount` must already be validated < 2^64 (deposit()/submit_batch()
+/// enforce it).
+pub fn fold(
+    env: &Env,
+    domain: u32,
+    acc: &BytesN<32>,
+    a: &BytesN<32>,
+    asset: u32,
+    amount: i128,
+) -> BytesN<32> {
+    let entry = poseidon3(
         env,
-        U256::from_u32(env, domain),
-        u256_from_word(env, acc),
         u256_from_word(env, a),
+        U256::from_u32(env, asset),
         U256::from_u128(env, amount as u128),
     );
+    let out = poseidon3(env, U256::from_u32(env, domain), u256_from_word(env, acc), entry);
     word_from_u256(env, &out)
 }
 

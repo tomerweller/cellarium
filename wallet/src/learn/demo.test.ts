@@ -11,7 +11,7 @@ describe('explainer demo tree (real Poseidon2)', () => {
 
     const alice = accounts[0];
     const { siblings } = demoPath(levels, alice.index);
-    const leaf = leafValue(alice.pkX, alice.balance, alice.nonce);
+    const leaf = leafValue(alice.pkX, alice.balance, 0n, alice.nonce);
     expect(rootFromPath(leaf, alice.index, siblings)).toBe(root);
   });
 
@@ -21,7 +21,7 @@ describe('explainer demo tree (real Poseidon2)', () => {
     const root = levels[levels.length - 1][0];
     const alice = accounts[0];
     const { siblings } = demoPath(levels, alice.index);
-    const fat = leafValue(alice.pkX, 10_000_000_000n, alice.nonce);
+    const fat = leafValue(alice.pkX, 10_000_000_000n, 0n, alice.nonce);
     expect(rootFromPath(fat, alice.index, siblings)).not.toBe(root);
   });
 

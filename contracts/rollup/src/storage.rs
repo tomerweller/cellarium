@@ -1,16 +1,22 @@
 use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env};
 
+/// Asset ids (DESIGN.md): 0 = cash (XLM), 1 = collateral (tUST).
+pub const ASSET_CASH: u32 = 0;
+pub const ASSET_COLL: u32 = 1;
+
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    Token,
+    /// Custody token contract per asset id.
+    Token(u32),
     Vk,
     Root,
     BatchNum,
-    DepHead,
-    DepTail,
-    /// FIFO deposit queue entry (ring buffer by sequence number).
-    Dep(u64),
+    /// FIFO deposit queue head/tail per asset id.
+    DepHead(u32),
+    DepTail(u32),
+    /// FIFO deposit queue entry (ring buffer by sequence number) per asset.
+    Dep(u32, u64),
 }
 
 #[contracttype]
@@ -20,12 +26,12 @@ pub struct PendingDeposit {
     pub amount: i128,
 }
 
-pub fn set_token(env: &Env, token: &Address) {
-    env.storage().instance().set(&DataKey::Token, token);
+pub fn set_token(env: &Env, asset: u32, token: &Address) {
+    env.storage().instance().set(&DataKey::Token(asset), token);
 }
 
-pub fn get_token(env: &Env) -> Address {
-    env.storage().instance().get(&DataKey::Token).unwrap()
+pub fn get_token(env: &Env, asset: u32) -> Address {
+    env.storage().instance().get(&DataKey::Token(asset)).unwrap()
 }
 
 pub fn set_vk(env: &Env, vk: &Bytes) {
@@ -52,29 +58,29 @@ pub fn get_batch_num(env: &Env) -> u64 {
     env.storage().instance().get(&DataKey::BatchNum).unwrap_or(0)
 }
 
-pub fn dep_head(env: &Env) -> u64 {
-    env.storage().instance().get(&DataKey::DepHead).unwrap_or(0)
+pub fn dep_head(env: &Env, asset: u32) -> u64 {
+    env.storage().instance().get(&DataKey::DepHead(asset)).unwrap_or(0)
 }
 
-pub fn dep_tail(env: &Env) -> u64 {
-    env.storage().instance().get(&DataKey::DepTail).unwrap_or(0)
+pub fn dep_tail(env: &Env, asset: u32) -> u64 {
+    env.storage().instance().get(&DataKey::DepTail(asset)).unwrap_or(0)
 }
 
-pub fn enqueue_deposit(env: &Env, dep: &PendingDeposit) -> u64 {
-    let tail = dep_tail(env);
-    env.storage().persistent().set(&DataKey::Dep(tail), dep);
-    env.storage().instance().set(&DataKey::DepTail, &(tail + 1));
+pub fn enqueue_deposit(env: &Env, asset: u32, dep: &PendingDeposit) -> u64 {
+    let tail = dep_tail(env, asset);
+    env.storage().persistent().set(&DataKey::Dep(asset, tail), dep);
+    env.storage().instance().set(&DataKey::DepTail(asset), &(tail + 1));
     tail
 }
 
-pub fn get_deposit(env: &Env, seq: u64) -> PendingDeposit {
-    env.storage().persistent().get(&DataKey::Dep(seq)).unwrap()
+pub fn get_deposit(env: &Env, asset: u32, seq: u64) -> PendingDeposit {
+    env.storage().persistent().get(&DataKey::Dep(asset, seq)).unwrap()
 }
 
-pub fn dequeue_deposits(env: &Env, count: u64) {
-    let head = dep_head(env);
+pub fn dequeue_deposits(env: &Env, asset: u32, count: u64) {
+    let head = dep_head(env, asset);
     for seq in head..head + count {
-        env.storage().persistent().remove(&DataKey::Dep(seq));
+        env.storage().persistent().remove(&DataKey::Dep(asset, seq));
     }
-    env.storage().instance().set(&DataKey::DepHead, &(head + count));
+    env.storage().instance().set(&DataKey::DepHead(asset), &(head + count));
 }

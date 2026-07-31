@@ -4,7 +4,7 @@
 import { useMemo, useState } from 'react';
 import { CopyableHex } from '../../components/common';
 import { frToHex32 } from '../../crypto/fields';
-import { p2, DOMAIN_DEP } from '../../crypto/poseidon2';
+import { p2, DOMAIN_DEP2 } from '../../crypto/poseidon2';
 import { daFold, txMessage } from '../../crypto/schnorr';
 import { demoRoot, makeAccounts } from '../demo';
 
@@ -21,8 +21,8 @@ export function PublicInputs() {
     applied[1].balance += 5_000_000n;
     const newRoot = demoRoot(applied);
     // One example deposit fold + the DA fold of one payment — real hashes.
-    const depositHash = p2([DOMAIN_DEP, 0n, alice.pkX, 10_000_000n]);
-    const msg = txMessage(alice.pkX, bob.pkX, 5_000_000n, 0n, false);
+    const depositHash = p2([DOMAIN_DEP2, 0n, p2([alice.pkX, 0n, 10_000_000n])]);
+    const msg = txMessage(alice.pkX, bob.pkX, 0n, 5_000_000n, 0n, false);
     const daCommitment = daFold(0n, msg);
     return { oldRoot, newRoot, depositHash, daCommitment };
   }, []);

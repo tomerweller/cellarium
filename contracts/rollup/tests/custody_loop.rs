@@ -1,10 +1,11 @@
 //! M5 checkpoint: the full custody loop against the real batch_n4 fixture —
-//! two SEP-41 deposits escrow tokens and enqueue L2 credits, the proven batch
-//! consumes them (1 transfer + 1 withdrawal on L2), and the withdrawal pays
-//! out on L1. Fixture scenario: `cargo run -p harness -- demo-batch`
+//! two SEP-41 deposits (one per asset) escrow tokens and enqueue L2 credits,
+//! the proven batch consumes them (1 cash transfer + 1 coll withdrawal on
+//! L2), and the withdrawal pays out on L1 from the coll custody pool.
+//! Fixture scenario: `cargo run -p harness -- demo-batch`
 //! (fixtures/batch_n4/meta.json records the constants replayed here).
 
-use rollup::{BatchEnvelope, RollupContract, RollupContractClient, Withdrawal};
+use rollup::{BatchEnvelope, RollupContract, RollupContractClient, Withdrawal, ASSET_CASH, ASSET_COLL};
 use soroban_sdk::testutils::Address as _;
 use soroban_sdk::{token, vec, Address, Bytes, BytesN, Env, String as SString};
 
@@ -46,7 +47,8 @@ fn meta() -> Meta {
 struct Setup<'a> {
     env: Env,
     rollup: RollupContractClient<'a>,
-    token: token::TokenClient<'a>,
+    cash: token::TokenClient<'a>,
+    coll: token::TokenClient<'a>,
     alice_l1: Address,
     bob_l1: Address,
     meta: Meta,
@@ -59,29 +61,40 @@ fn setup() -> Setup<'static> {
     let m = meta();
 
     let admin = Address::generate(&env);
-    let sac = env.register_stellar_asset_contract_v2(admin.clone());
-    let token_admin = token::StellarAssetClient::new(&env, &sac.address());
-    let token_client = token::TokenClient::new(&env, &sac.address());
+    let cash_sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let coll_sac = env.register_stellar_asset_contract_v2(admin.clone());
+    let cash_admin = token::StellarAssetClient::new(&env, &cash_sac.address());
+    let coll_admin = token::StellarAssetClient::new(&env, &coll_sac.address());
 
     let alice_l1 = Address::generate(&env);
     let bob_l1 = Address::generate(&env);
-    token_admin.mint(&alice_l1, &10_000);
-    token_admin.mint(&bob_l1, &10_000);
+    // Alice funds the cash leg, bob the coll leg (fixture scenario).
+    cash_admin.mint(&alice_l1, &10_000);
+    coll_admin.mint(&bob_l1, &10_000);
 
     let vk = Bytes::from_slice(&env, VK);
     let genesis = BytesN::from_array(&env, &m.old_root);
-    let rollup_id = env.register(RollupContract, (sac.address(), vk, genesis));
+    let rollup_id = env.register(RollupContract, (cash_sac.address(), coll_sac.address(), vk, genesis));
     let rollup = RollupContractClient::new(&env, &rollup_id);
 
-    Setup { env: env.clone(), rollup, token: token_client, alice_l1, bob_l1, meta: m }
+    Setup {
+        env: env.clone(),
+        rollup,
+        cash: token::TokenClient::new(&env, &cash_sac.address()),
+        coll: token::TokenClient::new(&env, &coll_sac.address()),
+        alice_l1,
+        bob_l1,
+        meta: m,
+    }
 }
 
 fn fixture_envelope(env: &Env, m: &Meta) -> BatchEnvelope {
     let wd_dest = Address::from_string(&SString::from_str(env, &m.wd_dest));
     BatchEnvelope {
         new_root: BytesN::from_array(env, &m.new_root),
-        deposit_count: 2,
-        withdrawals: vec![env, Withdrawal { dest: wd_dest, amount: 100 }],
+        deposit_count_cash: 1,
+        deposit_count_coll: 1,
+        withdrawals: vec![env, Withdrawal { dest: wd_dest, asset: ASSET_COLL, amount: 100 }],
         da_commitment: BytesN::from_array(env, &m.da_commitment),
         proof: Bytes::from_slice(env, PROOF),
     }
@@ -90,8 +103,8 @@ fn fixture_envelope(env: &Env, m: &Meta) -> BatchEnvelope {
 fn do_deposits(s: &Setup) {
     let alice_pk = BytesN::from_array(&s.env, &s.meta.alice_pk_x);
     let bob_pk = BytesN::from_array(&s.env, &s.meta.bob_pk_x);
-    s.rollup.deposit(&s.alice_l1, &alice_pk, &1000);
-    s.rollup.deposit(&s.bob_l1, &bob_pk, &500);
+    s.rollup.deposit(&s.alice_l1, &alice_pk, &ASSET_CASH, &1000);
+    s.rollup.deposit(&s.bob_l1, &bob_pk, &ASSET_COLL, &500);
 }
 
 #[test]
@@ -100,9 +113,11 @@ fn full_custody_loop() {
     let rollup_addr = s.rollup.address.clone();
 
     do_deposits(&s);
-    assert_eq!(s.token.balance(&rollup_addr), 1500);
-    assert_eq!(s.token.balance(&s.alice_l1), 9000);
-    assert_eq!(s.rollup.pending_deposit_count(), 2);
+    assert_eq!(s.cash.balance(&rollup_addr), 1000);
+    assert_eq!(s.coll.balance(&rollup_addr), 500);
+    assert_eq!(s.cash.balance(&s.alice_l1), 9000);
+    assert_eq!(s.rollup.pending_deposit_count(&ASSET_CASH), 1);
+    assert_eq!(s.rollup.pending_deposit_count(&ASSET_COLL), 1);
 
     // Sanity: the contract's PI assembly must reproduce the prover's blob.
     let envelope = fixture_envelope(&s.env, &s.meta);
@@ -115,14 +130,17 @@ fn full_custody_loop() {
         s.env.cost_estimate().budget().memory_bytes_cost()
     );
 
-    // Escrow: 1500 in, 100 withdrawn.
-    assert_eq!(s.token.balance(&rollup_addr), 1400);
+    // Escrow: coll pool pays the 100 withdrawal; cash pool is untouched.
+    assert_eq!(s.cash.balance(&rollup_addr), 1000);
+    assert_eq!(s.coll.balance(&rollup_addr), 400);
     let wd_dest = Address::from_string(&SString::from_str(&s.env, &s.meta.wd_dest));
-    assert_eq!(s.token.balance(&wd_dest), 100);
+    assert_eq!(s.coll.balance(&wd_dest), 100);
+    assert_eq!(s.cash.balance(&wd_dest), 0);
 
     assert_eq!(s.rollup.root(), BytesN::from_array(&s.env, &s.meta.new_root));
     assert_eq!(s.rollup.batch_num(), 1);
-    assert_eq!(s.rollup.pending_deposit_count(), 0);
+    assert_eq!(s.rollup.pending_deposit_count(&ASSET_CASH), 0);
+    assert_eq!(s.rollup.pending_deposit_count(&ASSET_COLL), 0);
 
     // Replay must fail: the root has advanced.
     assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
@@ -171,7 +189,23 @@ fn tampered_withdrawal_amount_fails() {
     do_deposits(&s);
     let mut envelope = fixture_envelope(&s.env, &s.meta);
     let wd = envelope.withdrawals.get(0).unwrap();
-    envelope.withdrawals = vec![&s.env, Withdrawal { dest: wd.dest, amount: 150 }];
+    envelope.withdrawals =
+        vec![&s.env, Withdrawal { dest: wd.dest, asset: wd.asset, amount: 150 }];
+    let sequencer = Address::generate(&s.env);
+    assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
+}
+
+#[test]
+fn reasseted_withdrawal_fails() {
+    // The proof binds the withdrawal's ASSET: paying the same amount from the
+    // other custody pool must fail verification (wrong-asset negative test,
+    // PLAN.md M1 acceptance).
+    let s = setup();
+    do_deposits(&s);
+    let mut envelope = fixture_envelope(&s.env, &s.meta);
+    let wd = envelope.withdrawals.get(0).unwrap();
+    envelope.withdrawals =
+        vec![&s.env, Withdrawal { dest: wd.dest, asset: ASSET_CASH, amount: wd.amount }];
     let sequencer = Address::generate(&s.env);
     assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
 }
@@ -182,8 +216,10 @@ fn redirected_withdrawal_fails() {
     do_deposits(&s);
     let mut envelope = fixture_envelope(&s.env, &s.meta);
     // Attacker redirects the payout to their own address.
-    envelope.withdrawals =
-        vec![&s.env, Withdrawal { dest: Address::generate(&s.env), amount: 100 }];
+    envelope.withdrawals = vec![
+        &s.env,
+        Withdrawal { dest: Address::generate(&s.env), asset: ASSET_COLL, amount: 100 },
+    ];
     let sequencer = Address::generate(&s.env);
     assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
 }
@@ -193,11 +229,16 @@ fn wrong_deposit_count_fails() {
     let s = setup();
     do_deposits(&s);
     let mut envelope = fixture_envelope(&s.env, &s.meta);
-    envelope.deposit_count = 1;
+    envelope.deposit_count_cash = 0;
     let sequencer = Address::generate(&s.env);
     assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
 
-    envelope.deposit_count = 3; // more than the queue holds
+    envelope.deposit_count_cash = 2; // more than the cash queue holds
+    assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
+
+    // Swapped counts: consume the coll entry as if it were cash.
+    envelope.deposit_count_cash = 0;
+    envelope.deposit_count_coll = 2;
     assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
 }
 
@@ -215,16 +256,20 @@ fn deposit_validation() {
     let s = setup();
     let pk = BytesN::from_array(&s.env, &s.meta.alice_pk_x);
     // Zero, negative, and >= 2^64 amounts are rejected.
-    assert!(s.rollup.try_deposit(&s.alice_l1, &pk, &0).is_err());
-    assert!(s.rollup.try_deposit(&s.alice_l1, &pk, &-5).is_err());
-    assert!(s.rollup.try_deposit(&s.alice_l1, &pk, &(i128::from(u64::MAX) + 1)).is_err());
+    assert!(s.rollup.try_deposit(&s.alice_l1, &pk, &ASSET_CASH, &0).is_err());
+    assert!(s.rollup.try_deposit(&s.alice_l1, &pk, &ASSET_CASH, &-5).is_err());
+    assert!(s
+        .rollup
+        .try_deposit(&s.alice_l1, &pk, &ASSET_CASH, &(i128::from(u64::MAX) + 1))
+        .is_err());
+    // Unknown asset id is rejected.
+    assert!(s.rollup.try_deposit(&s.alice_l1, &pk, &2u32, &100).is_err());
     // Non-canonical pk_x (>= r) and zero pk_x are rejected.
     let non_canonical = BytesN::from_array(&s.env, &[0xffu8; 32]);
-    assert!(s.rollup.try_deposit(&s.alice_l1, &non_canonical, &100).is_err());
+    assert!(s.rollup.try_deposit(&s.alice_l1, &non_canonical, &ASSET_CASH, &100).is_err());
     let zero = BytesN::from_array(&s.env, &[0u8; 32]);
-    assert!(s.rollup.try_deposit(&s.alice_l1, &zero, &100).is_err());
+    assert!(s.rollup.try_deposit(&s.alice_l1, &zero, &ASSET_CASH, &100).is_err());
     // Public padding keypair (sk=7) must never receive credits.
     let pad = BytesN::from_array(&s.env, &rollup::PAD_PK_X);
-    assert!(s.rollup.try_deposit(&s.alice_l1, &pad, &100).is_err());
+    assert!(s.rollup.try_deposit(&s.alice_l1, &pad, &ASSET_CASH, &100).is_err());
 }
-

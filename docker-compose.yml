@@ -21,6 +21,8 @@ services:
       NETWORK_PASSPHRASE: ${NETWORK_PASSPHRASE:-Test SDF Network ; September 2015}
       CONTRACT_ID: ${CONTRACT_ID:?run scripts/bootstrap_testnet.sh first}
       TOKEN_ID: ${TOKEN_ID:?}
+      TUST_ID: ${TUST_ID:?}
+      ORACLE_ID: ${ORACLE_ID:?}
       SEQUENCER_SECRET: ${SEQUENCER_SECRET:?}
       SEQUENCER_ADDRESS: ${SEQUENCER_ADDRESS:?}
       BATCH_MAX_WAIT_SECS: ${BATCH_MAX_WAIT_SECS:-30}

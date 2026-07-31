@@ -41,7 +41,7 @@ export function Deposit() {
         return;
       }
       setStep(1);
-      const hash = await deposit(params, addr, wallet.pkX, stroops);
+      const hash = await deposit(params, addr, wallet.pkX, 0, stroops);
       setStep(2);
       const outcome = await awaitTx(params, hash);
       if (outcome === 'failed') {

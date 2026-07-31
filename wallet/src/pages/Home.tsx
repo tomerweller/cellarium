@@ -55,14 +55,14 @@ export function Home() {
       </div>
     );
   } else {
-    const leaf = leafValue(hexToFr(account.pk_x), BigInt(account.balance), BigInt(account.nonce));
+    const leaf = leafValue(hexToFr(account.pk_x), BigInt(account.cash), BigInt(account.coll), BigInt(account.nonce));
     const included = verifyPath(leaf, account.index, account.siblings.map(hexToFr), hexToFr(account.root));
     hero = (
       <div className="hero">
         <div className="eyebrow">
           Balance{pending.total > 0 && <span className="pill" style={{ marginLeft: '0.6rem' }}>{pending.total} settling</span>}
         </div>
-        <div className="amount">{stroopsToXlm(BigInt(account.balance))} <small>XLM</small></div>
+        <div className="amount">{stroopsToXlm(BigInt(account.cash))} <small>XLM</small></div>
         <VerifiedSeal verified={included} root={account.root} batch={account.batch_num} />
       </div>
     );

@@ -25,8 +25,8 @@ impl From<HexError> for ChainError {
 pub trait StellarClient: Send + Sync {
     fn root(&self) -> Result<Fr, ChainError>;
     fn batch_num(&self) -> Result<u64, ChainError>;
-    fn dep_tail(&self) -> Result<u64, ChainError>;
-    fn get_pending_deposit(&self, seq: u64) -> Result<(Fr, u64), ChainError>;
+    fn dep_tail(&self, asset: u32) -> Result<u64, ChainError>;
+    fn get_pending_deposit(&self, asset: u32, seq: u64) -> Result<(Fr, u64), ChainError>;
     /// Sign + send submit_batch with the envelope JSON; returns when the CLI
     /// exits (success implies the tx was applied on-chain).
     fn submit_batch(&self, envelope_json: &str) -> Result<(), ChainError>;
@@ -132,12 +132,18 @@ impl StellarClient for CliClient {
         self.read_u64("batch_num")
     }
 
-    fn dep_tail(&self) -> Result<u64, ChainError> {
-        self.read_u64("dep_tail")
+    fn dep_tail(&self, asset: u32) -> Result<u64, ChainError> {
+        let out = self.invoke(false, &["dep_tail", "--asset", &asset.to_string()])?;
+        out.trim_matches('"')
+            .parse()
+            .map_err(|_| ChainError::Parse(format!("dep_tail({asset}) -> {out:?}")))
     }
 
-    fn get_pending_deposit(&self, seq: u64) -> Result<(Fr, u64), ChainError> {
-        let out = self.invoke(false, &["get_pending_deposit", "--seq", &seq.to_string()])?;
+    fn get_pending_deposit(&self, asset: u32, seq: u64) -> Result<(Fr, u64), ChainError> {
+        let out = self.invoke(
+            false,
+            &["get_pending_deposit", "--asset", &asset.to_string(), "--seq", &seq.to_string()],
+        )?;
         let v: serde_json::Value =
             serde_json::from_str(&out).map_err(|e| ChainError::Parse(e.to_string()))?;
         let pk_hex = v["pk_x"]

@@ -5,7 +5,7 @@
 //   s = (k + e*sk) mod n;  wire form: (r_x, r_y, s_lo, s_hi) 128-bit limbs.
 import { Fr, N_GRUMPKIN, randScalar } from './fields';
 import { Grumpkin, mulBase, pkFromSk, pointFromAffine } from './grumpkin';
-import { DOMAIN_DA, DOMAIN_SIG, DOMAIN_TX, p2 } from './poseidon2';
+import { DOMAIN_DA, DOMAIN_DEP2, DOMAIN_SIG, DOMAIN_TX, DOMAIN_WD2, p2 } from './poseidon2';
 
 export interface Signature {
   r_x: Fr;
@@ -16,20 +16,31 @@ export interface Signature {
 
 const LIMB_MASK = (1n << 128n) - 1n;
 
-/** The signed transaction message (arity 6, DESIGN.md). */
+/** The signed transaction message (arity 7, asset-bound, DESIGN.md). */
 export function txMessage(
   fromPkX: Fr,
   toField: Fr,
+  asset: bigint,
   amount: bigint,
   nonce: bigint,
   isWithdraw: boolean,
 ): Fr {
-  return p2([DOMAIN_TX, fromPkX, toField, amount, nonce, isWithdraw ? 1n : 0n]);
+  return p2([DOMAIN_TX, fromPkX, toField, asset, amount, nonce, isWithdraw ? 1n : 0n]);
 }
 
 /** DA-commitment fold step (DOMAIN_DA, arity 3). */
 export function daFold(acc: Fr, msg: Fr): Fr {
   return p2([DOMAIN_DA, acc, msg]);
+}
+
+/** Deposit-list fold step: acc' = P2([DEP2, acc, P2([pkX, asset, amount])]). */
+export function depFold(acc: Fr, pkX: Fr, asset: bigint, amount: bigint): Fr {
+  return p2([DOMAIN_DEP2, acc, p2([pkX, asset, amount])]);
+}
+
+/** Withdrawal-list fold step: acc' = P2([WD2, acc, P2([dest, asset, amount])]). */
+export function wdFold(acc: Fr, destField: Fr, asset: bigint, amount: bigint): Fr {
+  return p2([DOMAIN_WD2, acc, p2([destField, asset, amount])]);
 }
 
 export function sign(sk: bigint, msg: Fr, k: bigint = randScalar()): Signature {

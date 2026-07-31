@@ -12,9 +12,9 @@ import vectors from '../../../fixtures/vectors.json';
 import { addressToField } from './addressToField';
 import { Fr, frToHex32, hexToFr, N_GRUMPKIN, randScalar } from './fields';
 import { pkFromSk } from './grumpkin';
-import { computeRoot, leafValue, verifyPath } from './merkle';
-import { DOMAIN_DEP, DOMAIN_WD, p2 } from './poseidon2';
-import { daFold, sign, txMessage, verify } from './schnorr';
+import { balHash, computeRoot, leafValue, verifyPath } from './merkle';
+import { p2 } from './poseidon2';
+import { daFold, depFold, sign, txMessage, verify, wdFold } from './schnorr';
 
 const PK7_X = hexToFr(vectors.pad.pk_x);
 const PK7_Y = hexToFr(vectors.pad.pk_y);
@@ -26,9 +26,12 @@ const S_HI = hexToFr(vectors.pad.s_hi);
 const HASH2_1_2 = hexToFr(vectors.hash2_1_2);
 const HASH4_1_2_3_4 = hexToFr(vectors.hash4_1_2_3_4);
 const EMPTY_ROOT_D8 = hexToFr(vectors.empty_root_d8);
-const LEAF_1234_100_0 = hexToFr(vectors.leaf_1234_100_0);
+const BAL_HASH_100_40 = hexToFr(vectors.bal_hash_100_40);
+const LEAF_1234_100_40_0 = hexToFr(vectors.leaf_1234_100_40_0);
 const ROOT_LEAF_AT_5 = hexToFr(vectors.root_leaf_at_5);
 const DA_FOLD_0_42 = hexToFr(vectors.da_fold_0_42);
+const DEP2_FOLD = hexToFr(vectors.dep2_fold_0_1234_coll_77);
+const WD2_FOLD = hexToFr(vectors.wd2_fold_0_1234_coll_77);
 
 const ALICE_PK_X = hexToFr(vectors.alice_pk_x);
 const BOB_PK_X = hexToFr(vectors.bob_pk_x);
@@ -43,6 +46,8 @@ describe('poseidon2 vs pinned circuit constants', () => {
   it('hash2(1,2)', () => expect(p2([1n, 2n])).toBe(HASH2_1_2));
   it('hash4(1,2,3,4)', () => expect(p2([1n, 2n, 3n, 4n])).toBe(HASH4_1_2_3_4));
   it('daFold(0,42)', () => expect(daFold(0n, 42n)).toBe(DA_FOLD_0_42));
+  it('depFold(0, 1234, coll, 77)', () => expect(depFold(0n, 1234n, 1n, 77n)).toBe(DEP2_FOLD));
+  it('wdFold(0, 1234, coll, 77)', () => expect(wdFold(0n, 1234n, 1n, 77n)).toBe(WD2_FOLD));
 });
 
 describe('grumpkin key derivation', () => {
@@ -81,24 +86,24 @@ describe('schnorr signature vector (sk=7, k=13, msg=42)', () => {
 });
 
 describe('fold chains vs meta.json', () => {
-  it('deposit_hash', () => {
-    const acc1 = p2([DOMAIN_DEP, 0n, ALICE_PK_X, 1000n]);
-    const acc2 = p2([DOMAIN_DEP, acc1, BOB_PK_X, 500n]);
+  it('deposit_hash (alice cash, bob coll)', () => {
+    const acc1 = depFold(0n, ALICE_PK_X, 0n, 1000n);
+    const acc2 = depFold(acc1, BOB_PK_X, 1n, 500n);
     expect(acc2).toBe(DEPOSIT_HASH);
   });
-  it('withdraw_hash (exercises addressToField)', () => {
-    const wd = p2([DOMAIN_WD, 0n, addressToField(WD_DEST), 100n]);
+  it('withdraw_hash (coll leg; exercises addressToField)', () => {
+    const wd = wdFold(0n, addressToField(WD_DEST), 1n, 100n);
     expect(wd).toBe(WITHDRAW_HASH);
   });
   it('addressToField and txMessage match the harness directly', () => {
     expect(frToHex32(addressToField(WD_DEST))).toBe(vectors.wd_dest_field);
-    expect(frToHex32(txMessage(ALICE_PK_X, BOB_PK_X, 200n, 0n, false))).toBe(
-      vectors.tx_message_alice_bob_200_0,
+    expect(frToHex32(txMessage(ALICE_PK_X, BOB_PK_X, 0n, 200n, 0n, false))).toBe(
+      vectors.tx_message_alice_bob_cash_200_0,
     );
   });
   it('da_commitment (two-tx fold through txMessage)', () => {
-    const msg1 = txMessage(ALICE_PK_X, BOB_PK_X, 200n, 0n, false);
-    const msg2 = txMessage(BOB_PK_X, addressToField(WD_DEST), 100n, 0n, true);
+    const msg1 = txMessage(ALICE_PK_X, BOB_PK_X, 0n, 200n, 0n, false);
+    const msg2 = txMessage(BOB_PK_X, addressToField(WD_DEST), 1n, 100n, 0n, true);
     expect(daFold(daFold(0n, msg1), msg2)).toBe(DA_COMMITMENT);
   });
 });
@@ -133,16 +138,19 @@ describe('merkle tree vs test.nr', () => {
   it('empty depth-8 root', () => {
     expect(zeroLadder()[8]).toBe(EMPTY_ROOT_D8);
   });
-  it('leaf(1234,100,0)', () => {
-    expect(leafValue(1234n, 100n, 0n)).toBe(LEAF_1234_100_0);
+  it('balHash(100,40)', () => {
+    expect(balHash(100n, 40n)).toBe(BAL_HASH_100_40);
+  });
+  it('leaf(1234,100,40,0)', () => {
+    expect(leafValue(1234n, 100n, 40n, 0n)).toBe(LEAF_1234_100_40_0);
   });
   it('empty account is zero leaf', () => {
-    expect(leafValue(0n, 0n, 0n)).toBe(0n);
+    expect(leafValue(0n, 0n, 0n, 0n)).toBe(0n);
   });
   it('single leaf at index 5 root + verifyPath', () => {
     const z = zeroLadder();
     const siblings = z.slice(0, 8);
-    const leaf = leafValue(1234n, 100n, 0n);
+    const leaf = leafValue(1234n, 100n, 40n, 0n);
     expect(computeRoot(leaf, 5, siblings)).toBe(ROOT_LEAF_AT_5);
     expect(verifyPath(leaf, 5, siblings, ROOT_LEAF_AT_5)).toBe(true);
     // negatives

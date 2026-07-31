@@ -37,7 +37,7 @@ export function makeAccounts(): DemoAccount[] {
 export function demoLeaves(accounts: DemoAccount[]): Fr[] {
   const leaves: Fr[] = Array.from({ length: DEMO_SLOTS }, () => 0n);
   for (const a of accounts) {
-    if (a.onRollup) leaves[a.index] = leafValue(a.pkX, a.balance, a.nonce);
+    if (a.onRollup) leaves[a.index] = leafValue(a.pkX, a.balance, 0n, a.nonce);
   }
   return leaves;
 }

@@ -6,6 +6,7 @@ import { SEQUENCER_URL } from '../config';
 export interface Params {
   contract_id: string;
   token_id: string;
+  tust_id: string;
   network_passphrase: string;
   rpc_url: string;
   batch: { deposits: number; txs: number };
@@ -14,10 +15,12 @@ export interface Params {
 export interface AccountInfo {
   pk_x: string;
   index: number;
-  balance: string;
+  cash: string;
+  coll: string;
   nonce: number;
   pending_nonce: number;
-  pending_out: string;
+  pending_out_cash: string;
+  pending_out_coll: string;
   root: string;
   batch_num: number;
   siblings: string[];
@@ -38,6 +41,7 @@ export interface HistoryEntry {
   batch_num: number | null;
   kind: 'deposit' | 'transfer_in' | 'transfer_out' | 'withdraw';
   counterparty: string | null;
+  asset: number;
   amount: string;
   nonce: number | null;
   status: 'pending' | 'batched' | 'rejected';
@@ -55,6 +59,7 @@ export interface TxRequest {
   from_pk_x: string;
   from_pk_y: string;
   to: string;
+  asset: number;
   amount: string;
   nonce: number;
   is_withdraw: boolean;

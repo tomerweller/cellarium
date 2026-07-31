@@ -206,9 +206,11 @@ async fn get_params(State(st): State<AppState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "contract_id": st.cfg.contract_id,
         "token_id": st.cfg.token_id,
+        "tust_id": st.cfg.tust_id,
         "network_passphrase": st.cfg.network_passphrase,
         "rpc_url": st.cfg.rpc_url,
         "batch": { "deposits": st.cfg.deposit_slots, "txs": st.cfg.tx_slots },
-        "domains": { "leaf": 1, "tx": 2, "sig": 3, "dep": 4, "wd": 5, "addr": 6, "da": 7 },
+        "assets": { "cash": 0, "coll": 1 },
+        "domains": { "leaf": 1, "tx": 2, "sig": 3, "addr": 6, "da": 7, "dep2": 11, "wd2": 12 },
     }))
 }

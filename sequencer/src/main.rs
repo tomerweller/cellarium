@@ -45,10 +45,11 @@ async fn run() -> Result<(), String> {
         Arc::new(stellar::CliClient::new(&cfg).map_err(|e| format!("stellar client: {e}"))?);
     let chain_root = client.root().map_err(|e| format!("read root: {e}"))?;
     let chain_batch_num = client.batch_num().map_err(|e| format!("read batch_num: {e}"))?;
-    let dep_cursor = {
-        // Cursor persists in meta; default to 0 on a fresh DB.
-        db::meta_get_u64(&conn, "dep_cursor").map_err(|e| e.to_string())?
-    };
+    let dep_cursors = [
+        // Cursors persist in meta; default to 0 on a fresh DB.
+        db::meta_get_u64(&conn, "dep_cursor_0").map_err(|e| e.to_string())?,
+        db::meta_get_u64(&conn, "dep_cursor_1").map_err(|e| e.to_string())?,
+    ];
 
     let boot = engine::load_and_reconcile(&conn, &chain_root, chain_batch_num)?;
     tracing::info!(
@@ -60,7 +61,7 @@ async fn run() -> Result<(), String> {
     let engine = engine::spawn(cfg.clone(), conn, boot.tree, boot.chain_synced);
 
     // Background tasks: deposit watcher + batch pipeline.
-    tokio::spawn(watcher::run(engine.clone(), client.clone(), cfg.tick_secs, dep_cursor));
+    tokio::spawn(watcher::run(engine.clone(), client.clone(), cfg.tick_secs, dep_cursors));
     tokio::spawn(batcher::run(engine.clone(), client.clone(), cfg.clone()));
 
     // HTTP server.

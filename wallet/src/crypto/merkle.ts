@@ -6,8 +6,12 @@ import { DOMAIN_LEAF, p2 } from './poseidon2';
 
 export const DEPTH = 8;
 
-export function leafValue(pkX: Fr, balance: bigint, nonce: bigint): Fr {
-  return pkX === 0n ? 0n : p2([DOMAIN_LEAF, pkX, balance, nonce]);
+export function balHash(cash: bigint, coll: bigint): Fr {
+  return p2([cash, coll]);
+}
+
+export function leafValue(pkX: Fr, cash: bigint, coll: bigint, nonce: bigint): Fr {
+  return pkX === 0n ? 0n : p2([DOMAIN_LEAF, pkX, balHash(cash, coll), nonce]);
 }
 
 export function computeRoot(leaf: Fr, index: number, siblings: Fr[]): Fr {
