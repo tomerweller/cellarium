@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub type DbResult<T> = Result<T, rusqlite::Error>;
 
-pub const SCHEMA_VERSION: i64 = 2;
+pub const SCHEMA_VERSION: i64 = 3;
 
 pub fn open(path: &std::path::Path) -> DbResult<Connection> {
     let conn = Connection::open(path)?;
@@ -75,12 +75,76 @@ fn migrate(conn: &Connection) -> DbResult<()> {
           observed_at INTEGER NOT NULL,
           PRIMARY KEY (asset, seq)
         );
+        CREATE TABLE IF NOT EXISTS positions (
+          slot          INTEGER PRIMARY KEY,
+          borrower_pk_x TEXT NOT NULL,
+          lender_pk_x   TEXT NOT NULL,
+          cash          TEXT NOT NULL,
+          coll          TEXT NOT NULL,
+          rate_bps      INTEGER NOT NULL,
+          haircut_bps   INTEGER NOT NULL,
+          open_ts       INTEGER NOT NULL,
+          maturity_ts   INTEGER NOT NULL,
+          opened_batch  INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS intents (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          initiator     TEXT NOT NULL CHECK (initiator IN ('borrower','lender')),
+          borrower_pk_x TEXT NOT NULL,
+          borrower_pk_y TEXT NOT NULL,
+          lender_pk_x   TEXT NOT NULL,
+          lender_pk_y   TEXT NOT NULL,
+          cash          TEXT NOT NULL,
+          coll          TEXT NOT NULL,
+          rate_bps      INTEGER NOT NULL,
+          haircut_bps   INTEGER NOT NULL,
+          open_ts       INTEGER NOT NULL,
+          maturity_ts   INTEGER NOT NULL,
+          borrower_nonce INTEGER NOT NULL,
+          lender_nonce  INTEGER NOT NULL,
+          sig_r_x  TEXT NOT NULL,
+          sig_r_y  TEXT NOT NULL,
+          sig_s_lo TEXT NOT NULL,
+          sig_s_hi TEXT NOT NULL,
+          status      TEXT NOT NULL DEFAULT 'open',
+          created_at  INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS opens (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          intent_id     INTEGER,
+          borrower_pk_x TEXT NOT NULL,
+          borrower_pk_y TEXT NOT NULL,
+          lender_pk_x   TEXT NOT NULL,
+          lender_pk_y   TEXT NOT NULL,
+          cash          TEXT NOT NULL,
+          coll          TEXT NOT NULL,
+          rate_bps      INTEGER NOT NULL,
+          haircut_bps   INTEGER NOT NULL,
+          open_ts       INTEGER NOT NULL,
+          maturity_ts   INTEGER NOT NULL,
+          borrower_nonce INTEGER NOT NULL,
+          lender_nonce  INTEGER NOT NULL,
+          b_sig_r_x  TEXT NOT NULL,
+          b_sig_r_y  TEXT NOT NULL,
+          b_sig_s_lo TEXT NOT NULL,
+          b_sig_s_hi TEXT NOT NULL,
+          l_sig_r_x  TEXT NOT NULL,
+          l_sig_r_y  TEXT NOT NULL,
+          l_sig_s_lo TEXT NOT NULL,
+          l_sig_s_hi TEXT NOT NULL,
+          status      TEXT NOT NULL DEFAULT 'pending',
+          batch_num   INTEGER,
+          reject_reason TEXT,
+          received_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS batches (
           batch_num     INTEGER PRIMARY KEY,
           old_root      TEXT NOT NULL,
           new_root      TEXT NOT NULL,
           deposit_count_cash INTEGER NOT NULL,
           deposit_count_coll INTEGER NOT NULL,
+          batch_ts      INTEGER NOT NULL,
+          price         TEXT NOT NULL,
           da_commitment TEXT NOT NULL,
           blob_json     TEXT NOT NULL,
           envelope_json TEXT NOT NULL,
@@ -102,7 +166,7 @@ fn migrate(conn: &Connection) -> DbResult<()> {
           ts INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS history_pk ON history(pk_x, id DESC);
-        PRAGMA user_version = 2;
+        PRAGMA user_version = 3;
         COMMIT;
         "#,
     )
@@ -395,6 +459,8 @@ pub struct BatchRow {
     pub new_root: Fr,
     pub deposit_count_cash: u32,
     pub deposit_count_coll: u32,
+    pub batch_ts: u64,
+    pub price: u64,
     pub da_commitment: Fr,
     pub blob_json: String,
     pub envelope_json: String,
@@ -412,21 +478,24 @@ fn batch_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BatchRow> {
         new_root: parse_fr(&r.get::<_, String>(2)?).expect("db root corrupt"),
         deposit_count_cash: r.get::<_, i64>(3)? as u32,
         deposit_count_coll: r.get::<_, i64>(4)? as u32,
-        da_commitment: parse_fr(&r.get::<_, String>(5)?).expect("db da corrupt"),
-        blob_json: r.get(6)?,
-        envelope_json: r.get(7)?,
-        proof: r.get(8)?,
-        status: r.get(9)?,
-        tx_hash: r.get(10)?,
-        created_at: r.get(11)?,
-        confirmed_at: r.get(12)?,
+        batch_ts: r.get::<_, i64>(5)? as u64,
+        price: r.get::<_, String>(6)?.parse().expect("db price corrupt"),
+        da_commitment: parse_fr(&r.get::<_, String>(7)?).expect("db da corrupt"),
+        blob_json: r.get(8)?,
+        envelope_json: r.get(9)?,
+        proof: r.get(10)?,
+        status: r.get(11)?,
+        tx_hash: r.get(12)?,
+        created_at: r.get(13)?,
+        confirmed_at: r.get(14)?,
     })
 }
 
 const BATCH_COLS: &str = "batch_num, old_root, new_root, deposit_count_cash, deposit_count_coll, \
-                          da_commitment, blob_json, envelope_json, proof, status, tx_hash, \
-                          created_at, confirmed_at";
+                          batch_ts, price, da_commitment, blob_json, envelope_json, proof, status, \
+                          tx_hash, created_at, confirmed_at";
 
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 pub fn insert_batch(
     conn: &Connection,
@@ -435,20 +504,24 @@ pub fn insert_batch(
     new_root: &Fr,
     deposit_count_cash: u32,
     deposit_count_coll: u32,
+    batch_ts: u64,
+    price: u64,
     da_commitment: &Fr,
     blob_json: &str,
     envelope_json: &str,
 ) -> DbResult<()> {
     conn.execute(
         "INSERT INTO batches(batch_num, old_root, new_root, deposit_count_cash, deposit_count_coll,
-                             da_commitment, blob_json, envelope_json, status, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,'proving',?9)",
+                             batch_ts, price, da_commitment, blob_json, envelope_json, status, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'proving',?11)",
         params![
             batch_num as i64,
             fr_hex(old_root),
             fr_hex(new_root),
             deposit_count_cash as i64,
             deposit_count_coll as i64,
+            batch_ts as i64,
+            price.to_string(),
             fr_hex(da_commitment),
             blob_json,
             envelope_json,
@@ -613,4 +686,308 @@ pub fn history_for(conn: &Connection, pk_x: &Fr, limit: usize) -> DbResult<Vec<H
     }
     out.sort_by(|a, b| b.ts.cmp(&a.ts).then(b.id.cmp(&a.id)));
     Ok(out)
+}
+
+// ---------- intents / opens / positions (M2) ----------
+
+/// One row shape shared by intents (single sig) and opens (both sigs).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct IntentRow {
+    pub id: i64,
+    pub initiator: String,
+    pub borrower_pk_x: String,
+    pub borrower_pk_y: String,
+    pub lender_pk_x: String,
+    pub lender_pk_y: String,
+    pub cash: String,
+    pub coll: String,
+    pub rate_bps: u32,
+    pub haircut_bps: u32,
+    pub open_ts: u64,
+    pub maturity_ts: u64,
+    pub borrower_nonce: u64,
+    pub lender_nonce: u64,
+    pub sig: [String; 4],
+    pub status: String,
+    pub created_at: i64,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_intent(conn: &Connection, r: &IntentRow) -> DbResult<i64> {
+    conn.execute(
+        "INSERT INTO intents(initiator, borrower_pk_x, borrower_pk_y, lender_pk_x, lender_pk_y,
+                             cash, coll, rate_bps, haircut_bps, open_ts, maturity_ts,
+                             borrower_nonce, lender_nonce, sig_r_x, sig_r_y, sig_s_lo, sig_s_hi,
+                             created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
+        params![
+            r.initiator, r.borrower_pk_x, r.borrower_pk_y, r.lender_pk_x, r.lender_pk_y,
+            r.cash, r.coll, r.rate_bps as i64, r.haircut_bps as i64,
+            r.open_ts as i64, r.maturity_ts as i64,
+            r.borrower_nonce as i64, r.lender_nonce as i64,
+            r.sig[0], r.sig[1], r.sig[2], r.sig[3], now(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn intent_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<IntentRow> {
+    Ok(IntentRow {
+        id: r.get(0)?,
+        initiator: r.get(1)?,
+        borrower_pk_x: r.get(2)?,
+        borrower_pk_y: r.get(3)?,
+        lender_pk_x: r.get(4)?,
+        lender_pk_y: r.get(5)?,
+        cash: r.get(6)?,
+        coll: r.get(7)?,
+        rate_bps: r.get::<_, i64>(8)? as u32,
+        haircut_bps: r.get::<_, i64>(9)? as u32,
+        open_ts: r.get::<_, i64>(10)? as u64,
+        maturity_ts: r.get::<_, i64>(11)? as u64,
+        borrower_nonce: r.get::<_, i64>(12)? as u64,
+        lender_nonce: r.get::<_, i64>(13)? as u64,
+        sig: [r.get(14)?, r.get(15)?, r.get(16)?, r.get(17)?],
+        status: r.get(18)?,
+        created_at: r.get(19)?,
+    })
+}
+
+const INTENT_COLS: &str = "id, initiator, borrower_pk_x, borrower_pk_y, lender_pk_x, lender_pk_y, \
+                           cash, coll, rate_bps, haircut_bps, open_ts, maturity_ts, \
+                           borrower_nonce, lender_nonce, sig_r_x, sig_r_y, sig_s_lo, sig_s_hi, \
+                           status, created_at";
+
+pub fn get_intent(conn: &Connection, id: i64) -> DbResult<Option<IntentRow>> {
+    conn.query_row(
+        &format!("SELECT {INTENT_COLS} FROM intents WHERE id = ?1"),
+        [id],
+        intent_row,
+    )
+    .optional()
+}
+
+/// Open intents where the given pk is the COUNTERPARTY (the party that has
+/// not signed yet) — the privacy-filtered listing (PLAN.md 1.8 / 6.2).
+pub fn intents_for_counterparty(conn: &Connection, pk_x: &str) -> DbResult<Vec<IntentRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {INTENT_COLS} FROM intents WHERE status = 'open' AND
+           ((initiator = 'borrower' AND lender_pk_x = ?1) OR
+            (initiator = 'lender' AND borrower_pk_x = ?1))
+         ORDER BY id DESC"
+    ))?;
+    let rows = stmt.query_map([pk_x], intent_row)?;
+    rows.collect()
+}
+
+/// Open intents CREATED by the given pk (so initiators can see their own).
+pub fn intents_by_initiator(conn: &Connection, pk_x: &str) -> DbResult<Vec<IntentRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {INTENT_COLS} FROM intents WHERE status = 'open' AND
+           ((initiator = 'borrower' AND borrower_pk_x = ?1) OR
+            (initiator = 'lender' AND lender_pk_x = ?1))
+         ORDER BY id DESC"
+    ))?;
+    let rows = stmt.query_map([pk_x], intent_row)?;
+    rows.collect()
+}
+
+pub fn intent_set_status(conn: &Connection, id: i64, status: &str) -> DbResult<()> {
+    conn.execute("UPDATE intents SET status = ?1 WHERE id = ?2", params![status, id])?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenRow {
+    pub id: i64,
+    pub borrower_pk_x: Fr,
+    pub borrower_pk_y: Fr,
+    pub lender_pk_x: Fr,
+    pub lender_pk_y: Fr,
+    pub cash: u64,
+    pub coll: u64,
+    pub rate_bps: u32,
+    pub haircut_bps: u32,
+    pub open_ts: u64,
+    pub maturity_ts: u64,
+    pub borrower_nonce: u64,
+    pub lender_nonce: u64,
+    pub b_sig: [Fr; 4],
+    pub l_sig: [Fr; 4],
+    pub status: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn insert_open(
+    conn: &Connection,
+    intent_id: Option<i64>,
+    row: &OpenRow,
+) -> DbResult<i64> {
+    conn.execute(
+        "INSERT INTO opens(intent_id, borrower_pk_x, borrower_pk_y, lender_pk_x, lender_pk_y,
+                           cash, coll, rate_bps, haircut_bps, open_ts, maturity_ts,
+                           borrower_nonce, lender_nonce,
+                           b_sig_r_x, b_sig_r_y, b_sig_s_lo, b_sig_s_hi,
+                           l_sig_r_x, l_sig_r_y, l_sig_s_lo, l_sig_s_hi, received_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
+        params![
+            intent_id,
+            fr_hex(&row.borrower_pk_x), fr_hex(&row.borrower_pk_y),
+            fr_hex(&row.lender_pk_x), fr_hex(&row.lender_pk_y),
+            row.cash.to_string(), row.coll.to_string(),
+            row.rate_bps as i64, row.haircut_bps as i64,
+            row.open_ts as i64, row.maturity_ts as i64,
+            row.borrower_nonce as i64, row.lender_nonce as i64,
+            fr_hex(&row.b_sig[0]), fr_hex(&row.b_sig[1]), fr_hex(&row.b_sig[2]), fr_hex(&row.b_sig[3]),
+            fr_hex(&row.l_sig[0]), fr_hex(&row.l_sig[1]), fr_hex(&row.l_sig[2]), fr_hex(&row.l_sig[3]),
+            now(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+fn open_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<OpenRow> {
+    let get_fr = |i: usize| -> rusqlite::Result<Fr> {
+        let s: String = r.get(i)?;
+        Ok(parse_fr(&s).expect("db fr corrupt"))
+    };
+    Ok(OpenRow {
+        id: r.get(0)?,
+        borrower_pk_x: get_fr(1)?,
+        borrower_pk_y: get_fr(2)?,
+        lender_pk_x: get_fr(3)?,
+        lender_pk_y: get_fr(4)?,
+        cash: r.get::<_, String>(5)?.parse().expect("db cash corrupt"),
+        coll: r.get::<_, String>(6)?.parse().expect("db coll corrupt"),
+        rate_bps: r.get::<_, i64>(7)? as u32,
+        haircut_bps: r.get::<_, i64>(8)? as u32,
+        open_ts: r.get::<_, i64>(9)? as u64,
+        maturity_ts: r.get::<_, i64>(10)? as u64,
+        borrower_nonce: r.get::<_, i64>(11)? as u64,
+        lender_nonce: r.get::<_, i64>(12)? as u64,
+        b_sig: [get_fr(13)?, get_fr(14)?, get_fr(15)?, get_fr(16)?],
+        l_sig: [get_fr(17)?, get_fr(18)?, get_fr(19)?, get_fr(20)?],
+        status: r.get(21)?,
+    })
+}
+
+const OPEN_COLS: &str = "id, borrower_pk_x, borrower_pk_y, lender_pk_x, lender_pk_y, \
+                         cash, coll, rate_bps, haircut_bps, open_ts, maturity_ts, \
+                         borrower_nonce, lender_nonce, \
+                         b_sig_r_x, b_sig_r_y, b_sig_s_lo, b_sig_s_hi, \
+                         l_sig_r_x, l_sig_r_y, l_sig_s_lo, l_sig_s_hi, status";
+
+pub fn opens_pending(conn: &Connection, limit: usize) -> DbResult<Vec<OpenRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {OPEN_COLS} FROM opens WHERE status = 'pending' ORDER BY id LIMIT ?1"
+    ))?;
+    let rows = stmt.query_map([limit as i64], open_row)?;
+    rows.collect()
+}
+
+pub fn opens_pending_for(conn: &Connection, pk_x: &Fr) -> DbResult<u64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM opens WHERE status IN ('pending','batching')
+           AND (borrower_pk_x = ?1 OR lender_pk_x = ?1)",
+        [fr_hex(pk_x)],
+        |r| r.get::<_, i64>(0).map(|v| v as u64),
+    )
+}
+
+pub fn opens_count_pending(conn: &Connection) -> DbResult<u64> {
+    conn.query_row("SELECT COUNT(*) FROM opens WHERE status = 'pending'", [], |r| {
+        r.get::<_, i64>(0).map(|v| v as u64)
+    })
+}
+
+pub fn opens_oldest_pending_age(conn: &Connection) -> DbResult<Option<i64>> {
+    conn.query_row(
+        "SELECT MIN(received_at) FROM opens WHERE status = 'pending'",
+        [],
+        |r| r.get::<_, Option<i64>>(0),
+    )
+    .map(|min| min.map(|m| now() - m))
+}
+
+pub fn opens_set_status(
+    conn: &Connection,
+    ids: &[i64],
+    status: &str,
+    batch_num: Option<u64>,
+    reason: Option<&str>,
+) -> DbResult<()> {
+    for id in ids {
+        conn.execute(
+            "UPDATE opens SET status = ?1, batch_num = ?2, reject_reason = ?3 WHERE id = ?4",
+            params![status, batch_num.map(|b| b as i64), reason, id],
+        )?;
+    }
+    Ok(())
+}
+
+// -- positions (confirmed L2 state, mirrors harness PosTree) --
+
+#[derive(Debug, Clone)]
+pub struct PositionRow {
+    pub slot: u32,
+    pub borrower_pk_x: Fr,
+    pub lender_pk_x: Fr,
+    pub cash: u64,
+    pub coll: u64,
+    pub rate_bps: u32,
+    pub haircut_bps: u32,
+    pub open_ts: u64,
+    pub maturity_ts: u64,
+}
+
+pub fn upsert_position(conn: &Connection, p: &PositionRow, batch_num: u64) -> DbResult<()> {
+    conn.execute(
+        "INSERT INTO positions(slot, borrower_pk_x, lender_pk_x, cash, coll, rate_bps,
+                               haircut_bps, open_ts, maturity_ts, opened_batch)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
+         ON CONFLICT(slot) DO UPDATE SET borrower_pk_x = excluded.borrower_pk_x,
+           lender_pk_x = excluded.lender_pk_x, cash = excluded.cash, coll = excluded.coll,
+           rate_bps = excluded.rate_bps, haircut_bps = excluded.haircut_bps,
+           open_ts = excluded.open_ts, maturity_ts = excluded.maturity_ts,
+           opened_batch = excluded.opened_batch",
+        params![
+            p.slot as i64,
+            fr_hex(&p.borrower_pk_x),
+            fr_hex(&p.lender_pk_x),
+            p.cash.to_string(),
+            p.coll.to_string(),
+            p.rate_bps as i64,
+            p.haircut_bps as i64,
+            p.open_ts as i64,
+            p.maturity_ts as i64,
+            batch_num as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn delete_position(conn: &Connection, slot: u32) -> DbResult<()> {
+    conn.execute("DELETE FROM positions WHERE slot = ?1", [slot as i64])?;
+    Ok(())
+}
+
+pub fn load_positions(conn: &Connection) -> DbResult<Vec<PositionRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT slot, borrower_pk_x, lender_pk_x, cash, coll, rate_bps, haircut_bps,
+                open_ts, maturity_ts FROM positions",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(PositionRow {
+            slot: r.get::<_, i64>(0)? as u32,
+            borrower_pk_x: parse_fr(&r.get::<_, String>(1)?).expect("db pk corrupt"),
+            lender_pk_x: parse_fr(&r.get::<_, String>(2)?).expect("db pk corrupt"),
+            cash: r.get::<_, String>(3)?.parse().expect("db cash corrupt"),
+            coll: r.get::<_, String>(4)?.parse().expect("db coll corrupt"),
+            rate_bps: r.get::<_, i64>(5)? as u32,
+            haircut_bps: r.get::<_, i64>(6)? as u32,
+            open_ts: r.get::<_, i64>(7)? as u64,
+            maturity_ts: r.get::<_, i64>(8)? as u64,
+        })
+    })?;
+    rows.collect()
 }

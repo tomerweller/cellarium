@@ -50,10 +50,56 @@ Domain separators (Fr constants):
 | `DOMAIN_WD` | 5 | *(retired in M1; replaced by DOMAIN_WD2)* |
 | `DOMAIN_ADDR` | 6 | address_to_field |
 | `DOMAIN_DA` | 7 | DA-blob commitment fold (validium) |
+| `DOMAIN_POS` | 8 | position leaf (M2) |
+| `DOMAIN_OPEN` | 9 | repo-open signing message (M2) |
+| `DOMAIN_CLOSE` | 10 | repo-close signing message (M3) |
 | `DOMAIN_DEP2` | 11 | deposit fold, asset-bound (M1) |
 | `DOMAIN_WD2` | 12 | withdrawal fold, asset-bound (M1) |
 
-## State tree
+## State
+
+Since M2 the contract stores ONE combined root:
+
+```
+state_root = Poseidon2([account_root, position_root])
+```
+
+Genesis = both trees empty (`cargo run -p sequencer -- genesis-root`).
+
+### Position tree (M2)
+
+Depth 8 (256 open positions), same node/empty conventions as the account
+tree. Record `{borrower_pk_x, lender_pk_x, cash u64, coll u64, rate_bps u32,
+haircut_bps u32, open_ts u64, maturity_ts u64}`:
+
+```
+term_hash = Poseidon2([rate_bps, haircut_bps, open_ts, maturity_ts])
+amt_hash  = Poseidon2([cash, coll])
+pos_leaf  = Poseidon2([DOMAIN_POS, borrower_pk_x, lender_pk_x, Poseidon2([term_hash, amt_hash])])
+```
+
+Slot allocation is find-first-free (prover-supplied index; the circuit proves
+the old leaf is 0 under the RUNNING position root, which structurally
+prevents in-batch slot collisions). Closing zeroes the leaf.
+
+### Repo open (M2)
+
+Bilateral: both parties sign
+
+```
+open_msg = Poseidon2([DOMAIN_OPEN, borrower_pk_x, lender_pk_x,
+                      Poseidon2([term_hash, amt_hash, borrower_nonce, lender_nonce])])
+```
+
+`open_ts` is signer-agreed (not the batch timestamp) — every signed field is
+known at signing time; bilateral consent makes arbitrary values safe. Effects:
+lender.cash −= cash, borrower.cash += cash, borrower.coll −= coll, both
+nonces increment, position leaf written. Collateral sits in the position
+(title-transfer analog). Both signatures use the payment Schnorr scheme and
+defenses (even-y, range-checked s, on-curve, PAD blacklist in both roles).
+Batch order: deposits → opens → payments.
+
+## Account tree
 
 - Fixed depth **8** (256 accounts), parameterized in circuits and harness.
 - `bal_hash = Poseidon2([cash, coll])` — cash in stroops, coll in tUST base
@@ -92,19 +138,26 @@ Schnorr over Grumpkin (hand-rolled; std::schnorr no longer exists):
   batch slots. Active deposits/transfers **blacklist** `PAD_PK_X` (secret is
   public — crediting it would make funds drainable by anyone).
 
-## Batch circuit public interface
+## Batch circuit public interface (M2: batch_repo, D=4 opens O=2 payments T=4)
 
 ```
-main(old_root: pub Field, new_root: pub Field,
-     deposit_hash: pub Field, withdraw_hash: pub Field,
-     da_commitment: pub Field,
-     deposits: [Deposit; D], txs: [Tx; N])
+main(old_state_root: pub, new_state_root: pub,
+     deposit_hash: pub, withdraw_hash: pub, da_commitment: pub,
+     batch_ts: pub, price: pub,
+     old_acct_root, old_pos_root,           // private openings of state_root
+     deposits: [DepositWitness; D], opens: [OpenWitness; O], txs: [TxWitness; T])
 ```
 
-Exactly 5 public inputs (160-byte PI blob):
+Exactly 7 public inputs (224-byte PI blob):
 
-- `old_root` — contract storage.
-- `new_root` — envelope, becomes storage after verification.
+- `old_state_root` — contract storage.
+- `new_state_root` — envelope, becomes storage after verification.
+- `batch_ts` — claimed timestamp from the envelope; the contract enforces the
+  one-sided window `claimed <= ledger.timestamp() <= claimed + 60` (PLAN.md
+  6.1.3). Bound from M2, constrained by op logic from M3.
+- `price` — tUST/XLM as XLM-per-tUST × 1e7, read by submit_batch from the
+  oracle inside the same invocation; staleness > 300s rejects the batch.
+  Bound from M2, constrained by margin logic from M4.
 - `deposit_hash` — fold over the batch's FIFO deposit-queue prefixes, **cash
   queue first, then coll queue** (two on-chain queues since M1):
   `acc' = Poseidon2([DOMAIN_DEP2, acc, Poseidon2([pk_x, asset, amount])])`,
@@ -113,14 +166,14 @@ Exactly 5 public inputs (160-byte PI blob):
 - `withdraw_hash` — same fold shape with `DOMAIN_WD2` over
   `Poseidon2([address_to_field(dest), asset, amount])` entries from the
   envelope.
-- `da_commitment` — fold over each **active** tx's signing message, in order:
-  `acc' = Poseidon2([DOMAIN_DA, acc, tx_msg])` (3-input), `acc₀ = 0`. The
-  message already binds `(from_pk_x, to_field, amount, nonce, is_withdraw)` —
-  everything needed to reconstruct state from the published blob. Taken from
-  the envelope (prover-supplied) and bound by the proof; verifiers fetch the
-  blob from the sequencer's `GET /da/:batch_num` and re-fold. Signatures ship
-  in the blob as audit data but are NOT commitment-bound (authorization is
-  already established by the proof itself).
+- `da_commitment` — fold over each **active** off-chain-originated op in
+  application order: repo opens contribute `P2([open_msg, pos_index])`
+  (binding the slot), payments contribute their signing message:
+  `acc' = Poseidon2([DOMAIN_DA, acc, rec])` (3-input), `acc₀ = 0`. Deposits
+  stay out of the fold — their data is on-chain in the queues and pinned by
+  `deposit_hash`. Verifiers fetch the blob from `GET /da/:batch_num` and
+  re-fold. Signatures ship in the blob as audit data but are NOT
+  commitment-bound (authorization is already established by the proof).
 
 `address_to_field` = Poseidon2 over the 56-byte strkey split into two 28-byte
 limbs with `DOMAIN_ADDR` (ported from OZ confidential storage.rs).
@@ -130,7 +183,7 @@ accumulators. Active entries require `amount > 0`.
 
 ## Envelope (submit_batch argument)
 
-`{ new_root: BytesN<32>, deposit_count_cash: u32, deposit_count_coll: u32, withdrawals: Vec<Withdrawal>, da_commitment: BytesN<32>, proof: Bytes }`
+`{ new_root: BytesN<32>, batch_ts: u64, deposit_count_cash: u32, deposit_count_coll: u32, withdrawals: Vec<Withdrawal>, da_commitment: BytesN<32>, proof: Bytes }`
 
 `Withdrawal = { dest: Address, asset: u32, amount: i128 }`; payouts draw from
 the matching custody token.

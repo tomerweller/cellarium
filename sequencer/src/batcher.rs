@@ -28,7 +28,21 @@ pub async fn run(
     let mut interval = tokio::time::interval(Duration::from_secs(cfg.tick_secs));
     loop {
         interval.tick().await;
-        match try_build(&engine).await {
+        // Fetch the oracle price for this tick: the 7th public input must be
+        // exactly what the contract will read at submission.
+        let c = client.clone();
+        let price = match tokio::task::spawn_blocking(move || c.oracle_price()).await {
+            Ok(Ok(p)) => p,
+            Ok(Err(e)) => {
+                tracing::warn!(%e, "oracle price fetch failed; skipping tick");
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(%e, "oracle price task panicked");
+                continue;
+            }
+        };
+        match try_build(&engine, price).await {
             Ok(Some(job)) => {
                 run_pipeline(&engine, &client, &cfg, job).await;
             }
@@ -182,8 +196,8 @@ async fn inflight(engine: &mpsc::Sender<Command>) -> Option<(u64, String)> {
     rx.await.ok().flatten()
 }
 
-async fn try_build(engine: &mpsc::Sender<Command>) -> Result<Option<BatchJob>, ApiError> {
-    ask_r(engine, Command::TryBuildBatch).await
+async fn try_build(engine: &mpsc::Sender<Command>, price: u64) -> Result<Option<BatchJob>, ApiError> {
+    ask_r(engine, |r| Command::TryBuildBatch(price, r)).await
 }
 
 async fn record_proof(

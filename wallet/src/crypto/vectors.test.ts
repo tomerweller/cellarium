@@ -14,6 +14,7 @@ import { Fr, frToHex32, hexToFr, N_GRUMPKIN, randScalar } from './fields';
 import { pkFromSk } from './grumpkin';
 import { balHash, computeRoot, leafValue, verifyPath } from './merkle';
 import { p2 } from './poseidon2';
+import { openMessage, posLeaf, stateRoot, PositionTerms } from './repo';
 import { daFold, depFold, sign, txMessage, verify, wdFold } from './schnorr';
 
 const PK7_X = hexToFr(vectors.pad.pk_x);
@@ -159,5 +160,28 @@ describe('merkle tree vs test.nr', () => {
     const tampered = [...siblings];
     tampered[0] = 1n;
     expect(verifyPath(leaf, 5, tampered, ROOT_LEAF_AT_5)).toBe(false);
+  });
+});
+
+describe('repo position hashing vs pinned vectors', () => {
+  const rp = vectors.repo_demo_position;
+  const terms: PositionTerms = {
+    borrowerPkX: hexToFr(rp.borrower_pk_x),
+    lenderPkX: hexToFr(rp.lender_pk_x),
+    cash: BigInt(rp.cash),
+    coll: BigInt(rp.coll),
+    rateBps: BigInt(rp.rate_bps),
+    haircutBps: BigInt(rp.haircut_bps),
+    openTs: BigInt(rp.open_ts),
+    maturityTs: BigInt(rp.maturity_ts),
+  };
+  it('pos_leaf matches the harness', () => {
+    expect(frToHex32(posLeaf(terms))).toBe(rp.pos_leaf);
+  });
+  it('open message (nonces 0,0) matches the harness', () => {
+    expect(frToHex32(openMessage(terms, 0n, 0n))).toBe(rp.open_msg_n0_n0);
+  });
+  it('empty combined state root matches the harness', () => {
+    expect(frToHex32(stateRoot(EMPTY_ROOT_D8, EMPTY_ROOT_D8))).toBe(vectors.empty_state_root);
   });
 });

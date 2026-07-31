@@ -25,6 +25,9 @@ impl From<HexError> for ChainError {
 pub trait StellarClient: Send + Sync {
     fn root(&self) -> Result<Fr, ChainError>;
     fn batch_num(&self) -> Result<u64, ChainError>;
+    /// Current oracle price (XLM-per-tUST x 1e7); bound as the 7th public
+    /// input, so the witness must use exactly what the contract will read.
+    fn oracle_price(&self) -> Result<u64, ChainError>;
     fn dep_tail(&self, asset: u32) -> Result<u64, ChainError>;
     fn get_pending_deposit(&self, asset: u32, seq: u64) -> Result<(Fr, u64), ChainError>;
     /// Sign + send submit_batch with the envelope JSON; returns when the CLI
@@ -41,6 +44,7 @@ pub struct CliClient {
     pub rpc_url: String,
     pub network_passphrase: String,
     pub contract_id: String,
+    pub oracle_id: String,
     pub sequencer_address: String,
 }
 
@@ -79,17 +83,18 @@ impl CliClient {
             rpc_url: cfg.rpc_url.clone(),
             network_passphrase: cfg.network_passphrase.clone(),
             contract_id: cfg.contract_id.clone(),
+            oracle_id: cfg.oracle_id.clone(),
             sequencer_address,
         })
     }
 
-    fn invoke(&self, send: bool, func_and_args: &[&str]) -> Result<String, ChainError> {
+    fn invoke_on(&self, contract: &str, send: bool, func_and_args: &[&str]) -> Result<String, ChainError> {
         let mut cmd = Command::new("stellar");
         cmd.args([
             "contract",
             "invoke",
             "--id",
-            &self.contract_id,
+            contract,
             "--rpc-url",
             &self.rpc_url,
             "--network-passphrase",
@@ -113,6 +118,10 @@ impl CliClient {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 
+    fn invoke(&self, send: bool, func_and_args: &[&str]) -> Result<String, ChainError> {
+        self.invoke_on(&self.contract_id.clone(), send, func_and_args)
+    }
+
     fn read_u64(&self, func: &str) -> Result<u64, ChainError> {
         let out = self.invoke(false, &[func])?;
         out.trim_matches('"')
@@ -130,6 +139,20 @@ impl StellarClient for CliClient {
 
     fn batch_num(&self) -> Result<u64, ChainError> {
         self.read_u64("batch_num")
+    }
+
+    fn oracle_price(&self) -> Result<u64, ChainError> {
+        let out = self.invoke_on(&self.oracle_id.clone(), false, &["lastprice"])?;
+        let v: serde_json::Value =
+            serde_json::from_str(&out).map_err(|e| ChainError::Parse(e.to_string()))?;
+        let price_str = match &v["price"] {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Number(n) => n.to_string(),
+            other => return Err(ChainError::Parse(format!("oracle price: {other}"))),
+        };
+        price_str
+            .parse()
+            .map_err(|_| ChainError::Parse(format!("oracle price: {price_str}")))
     }
 
     fn dep_tail(&self, asset: u32) -> Result<u64, ChainError> {

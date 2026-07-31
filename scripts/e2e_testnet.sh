@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # Soribium end-to-end acceptance test against public testnet, driving the
 # NATIVE sequencer (the proving path bb needs is native arm64/amd64 here).
-# Deploys fresh contracts (rollup + tUST token), boots the sequencer, then
-# (M1 acceptance, PLAN.md): deposits XLM and tUST to two users, L2-transfers
-# each asset, withdraws each asset, asserting every invariant including the
-# wrong-asset negative (exit 1 on any mismatch).
+# Deploys fresh contracts (rollup + tUST + oracle), boots the sequencer, then:
+#   M1: deposits XLM and tUST to two users, L2-transfers each asset,
+#       withdraws each asset (wrong-asset negative included);
+#   M2: repo open via the bilateral intent flow (post -> countersign ->
+#       batch -> on-chain state-root advance; positions visible both sides).
 #
 # The docker-compose path (`just bootstrap && just up`) exercises the same
 # sequencer binary; this script uses the native process so it runs anywhere
@@ -38,15 +39,21 @@ echo "    tust=$TUST"
 stellar contract invoke --id "$TUST" --source "$IDENTITY" --network testnet -- \
   mint --to "$SEQ_ADDR" --amount 10000000 >/dev/null
 
-VK=$(xxd -p fixtures/batch_n16/vk.bin | tr -d '\n')
+ORACLE=$(stellar contract deploy --wasm target/wasm32v1-none/release/oracle.wasm \
+  --source "$IDENTITY" --network testnet -- --admin "$SEQ_ADDR")
+echo "    oracle=$ORACLE"
+stellar contract invoke --id "$ORACLE" --source "$IDENTITY" --network testnet -- \
+  set_price --price 250000000 >/dev/null
+
+VK=$(xxd -p fixtures/batch_repo/vk.bin | tr -d '\n')
 GENESIS=$(cargo run -q -p sequencer -- genesis-root); GENESIS=${GENESIS#0x}
 ROLLUP=$(stellar contract deploy --wasm target/wasm32v1-none/release/rollup.wasm \
   --source "$IDENTITY" --network testnet -- --token_cash "$TOKEN" --token_coll "$TUST" \
-  --vk "$VK" --genesis_root "$GENESIS")
+  --oracle "$ORACLE" --vk "$VK" --genesis_root "$GENESIS")
 echo "    rollup=$ROLLUP"
 
 echo "==> boot sequencer"
-export CONTRACT_ID=$ROLLUP TOKEN_ID=$TOKEN TUST_ID=$TUST SEQUENCER_SECRET=$SEQ_SECRET SEQUENCER_ADDRESS=$SEQ_ADDR
+export CONTRACT_ID=$ROLLUP TOKEN_ID=$TOKEN TUST_ID=$TUST ORACLE_ID=$ORACLE SEQUENCER_SECRET=$SEQ_SECRET SEQUENCER_ADDRESS=$SEQ_ADDR
 export RPC_URL=https://soroban-testnet.stellar.org
 export NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 export DB_PATH="$SCRATCH/e2e.db" LISTEN_ADDR="127.0.0.1:$PORT" BATCH_MAX_WAIT_SECS=15
@@ -132,6 +139,44 @@ BN=$(curl -s "$URL/status" | jget batch_num)
 PROOF_LEN=$(curl -s "$URL/da/$BN" | grep -o '"proof":"[0-9a-f]*"' | head -1 | tr -d '"' | sed 's/proof://' | wc -c | tr -d ' ')
 [ "$PROOF_LEN" -gt 20000 ] || fail "DA blob proof missing (len=$PROOF_LEN)"
 echo "    DA blob for batch $BN served (proof present)"
+
+echo "==> repo open: intent -> countersign -> batch"
+# bob (borrower, sk=202) initiates against alice (lender, sk=101):
+# 300000 stroops cash vs 900000 tUST coll, 4.30%, 2% haircut, 1h term.
+# Nonces are fetched live by the sim (alice: 2 after send+withdraw; bob: 2).
+INTENT=$($SIM intent 202 borrower 101 300000 900000 430 200 3600)
+INTENT_ID=$(echo "$INTENT" | jget id)
+[ -n "$INTENT_ID" ] || fail "intent not accepted: $INTENT"
+
+# The intent must be visible to the counterparty (and carry the terms).
+curl -s "$URL/intents/$ALICE" | grep -q '"cash":"300000"' || fail "intent not listed for lender"
+
+# Countersigning with the WRONG key must be rejected (single-signature guard).
+BADSIG=$($SIM accept 303 "$INTENT_ID" 2>&1 || true)
+echo "$BADSIG" | grep -qE "BAD_SIGNATURE|not found in incoming" || fail "wrong-key countersign accepted: $BADSIG"
+
+$SIM accept 101 "$INTENT_ID" >/dev/null
+repo_landed() {
+  curl -s "$URL/positions/$BOB" | grep -q '"cash":"300000"'
+}
+for i in $(seq 1 36); do repo_landed && break; sleep 5; done
+repo_landed || fail "repo open never confirmed"
+
+# Position visible from both sides with the agreed terms.
+curl -s "$URL/positions/$ALICE" | grep -q '"rate_bps":430' || fail "lender position missing terms"
+curl -s "$URL/positions/$BOB" | grep -q '"haircut_bps":200' || fail "borrower position missing terms"
+
+# Balance effects: borrower cash += 300000 (bob 600000 -> 900000), borrower
+# coll -= 900000 (1600000 -> 700000), lender cash -= 300000 (800000 -> 500000).
+[ "$(curl -s "$URL/account/$BOB" | jget cash)" = "900000" ] || fail "borrower cash after open"
+[ "$(curl -s "$URL/account/$BOB" | jget coll)" = "700000" ] || fail "borrower coll after open"
+[ "$(curl -s "$URL/account/$ALICE" | jget cash)" = "500000" ] || fail "lender cash after open"
+
+# Sequencer state root (accounts+positions) == on-chain root after the open.
+SEQ_ROOT2=$(curl -s "$URL/status" | jget root)
+CHAIN_ROOT2=0x$(stellar contract invoke --id "$ROLLUP" --source "$IDENTITY" --network testnet --send=no -- root 2>/dev/null | tr -d '"')
+[ "$SEQ_ROOT2" = "$CHAIN_ROOT2" ] || fail "post-open root mismatch: seq $SEQ_ROOT2 vs chain $CHAIN_ROOT2"
+echo "    repo open confirmed; positions visible both sides; roots match"
 
 # Anti-replay: resubmitting alice's consumed nonce 0 must NOT re-execute —
 # the (sender,nonce) idempotency short-circuit returns the original included

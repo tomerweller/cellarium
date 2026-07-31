@@ -29,9 +29,10 @@ async fn run() -> Result<(), String> {
     // One-shot subcommand (needs no config/env): print the empty-tree genesis
     // root and exit. Used by the bootstrap script.
     if std::env::args().nth(1).as_deref() == Some("genesis-root") {
+        // Combined genesis: P2([empty account root, empty position root]).
         let hasher = harness::poseidon::Hasher::new();
-        let tree = harness::tree::Tree::new();
-        println!("{}", hexutil::fr_hex(&tree.root(&hasher)));
+        let state = harness::repo::L2State::new();
+        println!("{}", hexutil::fr_hex(&state.state_root(&hasher)));
         return Ok(());
     }
 
@@ -58,7 +59,7 @@ async fn run() -> Result<(), String> {
         "reconciled local state against chain"
     );
 
-    let engine = engine::spawn(cfg.clone(), conn, boot.tree, boot.chain_synced);
+    let engine = engine::spawn(cfg.clone(), conn, boot.state, boot.chain_synced);
 
     // Background tasks: deposit watcher + batch pipeline.
     tokio::spawn(watcher::run(engine.clone(), client.clone(), cfg.tick_secs, dep_cursors));

@@ -23,6 +23,20 @@ fn main() {
             std::fs::write(path, harness::noir_vectors::emit()).expect("write tx_vectors.nr");
             println!("wrote {path}");
         }
+        // Witness vectors for the circuit repo_test.nr suite (M2).
+        "noir-repo-vectors" => {
+            let path = "circuits/lib/src/repo_vectors.nr";
+            std::fs::write(path, harness::noir_repo_vectors::emit()).expect("write repo_vectors.nr");
+            println!("wrote {path}");
+        }
+        // Deterministic repo demo batch -> Prover.toml -> bb -> fixtures/batch_repo.
+        "demo-repo-batch" => demo_repo_batch(),
+        // Combined genesis state root (both trees empty).
+        "genesis-state-root" => {
+            let hasher = Hasher::new();
+            let state = harness::repo::L2State::new();
+            println!("{}", to_hex(&state.state_root(&hasher)));
+        }
         _ => {
             eprintln!("usage: harness vectors");
             std::process::exit(2);
@@ -190,6 +204,120 @@ fn demo_batch() {
     println!("wrote fixtures/batch_n4/{{meta.json, envelope.json}}");
 }
 
+/// The deterministic repo scenario replayed by the contract's repo-loop test:
+/// alice (sk=101) deposits 10M cash, bob (sk=202) deposits 5M coll; bob
+/// borrows 1M cash from alice against 3M coll (430 bps, 2% haircut, 1 day);
+/// then alice pays bob 250k cash and bob withdraws 100k coll to wd_addr().
+fn demo_repo_batch() {
+    use harness::batch::{make_signed_tx, DepositRequest};
+    use harness::keys::sign_with_nonce;
+    use harness::l1::address_to_field;
+    use harness::prover;
+    use harness::repo::{build_repo_batch, open_message, L2State, OpenRequest, Position};
+    use rand::SeedableRng;
+
+    let hasher = Hasher::new();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(3);
+
+    let alice = harness::keys::Keypair::from_sk(ark_grumpkin::Fr::from(101u64)); // lender
+    let bob = harness::keys::Keypair::from_sk(ark_grumpkin::Fr::from(202u64)); // borrower
+    let wd_addr = wd_addr();
+    let wd_field = address_to_field(&hasher, &wd_addr);
+
+    const BATCH_TS: u64 = 1_700_000_100;
+    const PRICE: u64 = 250_000_000; // 25 XLM per tUST × 1e7
+
+    let mut state = L2State::new();
+    let deposits = [
+        DepositRequest { pk_x: alice.pk_x(), asset: Asset::Cash, amount: 10_000_000 },
+        DepositRequest { pk_x: bob.pk_x(), asset: Asset::Coll, amount: 5_000_000 },
+    ];
+    let position = Position {
+        borrower_pk_x: bob.pk_x(),
+        lender_pk_x: alice.pk_x(),
+        cash: 1_000_000,
+        coll: 3_000_000,
+        rate_bps: 430,
+        haircut_bps: 200,
+        open_ts: 1_700_000_000,
+        maturity_ts: 1_700_000_000 + 86_400,
+    };
+    let open_msg = open_message(&hasher, &position, 0, 0);
+    let open = OpenRequest {
+        position: position.clone(),
+        borrower_pk_y: bob.pk_y(),
+        lender_pk_y: alice.pk_y(),
+        borrower_nonce: 0,
+        lender_nonce: 0,
+        borrower_sig: sign_with_nonce(&hasher, &bob, open_msg, ark_grumpkin::Fr::from(9101u64)),
+        lender_sig: sign_with_nonce(&hasher, &alice, open_msg, ark_grumpkin::Fr::from(9102u64)),
+    };
+    let txs = [
+        make_signed_tx(&hasher, &alice, bob.pk_x(), Asset::Cash, 250_000, 1, false, &mut rng),
+        make_signed_tx(&hasher, &bob, wd_field, Asset::Coll, 100_000, 1, true, &mut rng),
+    ];
+    let witness = build_repo_batch(
+        &hasher, &mut state, 4, 2, 4, &deposits, &[open], &txs, BATCH_TS, PRICE,
+    )
+    .expect("demo repo batch must build");
+
+    println!("old_state_root = {}", to_hex(&witness.old_state_root));
+    println!("new_state_root = {}", to_hex(&witness.new_state_root));
+    println!("da_commitment  = {}", to_hex(&witness.da_commitment));
+
+    let meta = serde_json::json!({
+        "old_state_root": to_hex(&witness.old_state_root),
+        "new_state_root": to_hex(&witness.new_state_root),
+        "deposit_hash": to_hex(&witness.deposit_hash),
+        "withdraw_hash": to_hex(&witness.withdraw_hash),
+        "da_commitment": to_hex(&witness.da_commitment),
+        "batch_ts": BATCH_TS,
+        "price": PRICE.to_string(),
+        "deposits": [
+            { "pk_x": to_hex(&alice.pk_x()), "asset": 0, "amount": 10000000 },
+            { "pk_x": to_hex(&bob.pk_x()), "asset": 1, "amount": 5000000 },
+        ],
+        "open": {
+            "borrower_pk_x": to_hex(&bob.pk_x()),
+            "lender_pk_x": to_hex(&alice.pk_x()),
+            "cash": 1000000, "coll": 3000000,
+            "rate_bps": 430, "haircut_bps": 200,
+            "open_ts": 1700000000u64, "maturity_ts": 1700086400u64,
+            "pos_index": witness.open_slots[0],
+        },
+        "withdrawals": [ { "dest": wd_addr, "asset": 1, "amount": 100000 } ],
+    });
+    let root = prover::repo_root();
+    let fixture_dir = root.join("fixtures/batch_repo");
+    std::fs::create_dir_all(&fixture_dir).unwrap();
+    std::fs::write(
+        fixture_dir.join("meta.json"),
+        serde_json::to_string_pretty(&meta).unwrap(),
+    )
+    .unwrap();
+
+    let toml = prover::to_repo_prover_toml(&witness);
+    prover::prove("batch_repo", &toml).expect("prove pipeline failed");
+
+    let proof = std::fs::read(fixture_dir.join("proof")).unwrap();
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{x:02x}")).collect::<String>();
+    let envelope = serde_json::json!({
+        "new_root": to_hex(&witness.new_state_root).trim_start_matches("0x"),
+        "deposit_count_cash": 1,
+        "deposit_count_coll": 1,
+        "withdrawals": [ { "dest": wd_addr, "asset": 1, "amount": "100000" } ],
+        "da_commitment": to_hex(&witness.da_commitment).trim_start_matches("0x"),
+        "batch_ts": BATCH_TS,
+        "proof": hex(&proof),
+    });
+    std::fs::write(
+        fixture_dir.join("envelope.json"),
+        serde_json::to_string(&envelope).unwrap(),
+    )
+    .unwrap();
+    println!("wrote fixtures/batch_repo/{{meta.json, envelope.json}}");
+}
+
 /// D deposits + N txs (N-2 transfers, 2 withdrawals) purely for cost-scaling
 /// measurements; no meta/envelope needed (measured via the verify entrypoint).
 fn demo_batch_sized(d: usize, n: usize, pkg: &str) {
@@ -294,6 +422,24 @@ fn vectors_json() {
     let pad_sig = pad_signature(&hasher);
     let (pad_lo, pad_hi) = pad_sig.s_limbs();
 
+    // Repo primitives (M2): the demo position's leaf + open message, and the
+    // empty combined state root. Pinned by circuits repo tests + wallet.
+    let alice_kp = Keypair::from_sk(ark_grumpkin::Fr::from(101u64));
+    let bob_kp = Keypair::from_sk(ark_grumpkin::Fr::from(202u64));
+    let demo_pos = harness::repo::Position {
+        borrower_pk_x: bob_kp.pk_x(),
+        lender_pk_x: alice_kp.pk_x(),
+        cash: 1_000_000,
+        coll: 3_000_000,
+        rate_bps: 430,
+        haircut_bps: 200,
+        open_ts: 1_700_000_000,
+        maturity_ts: 1_700_086_400,
+    };
+    let demo_pos_leaf = harness::repo::pos_leaf(&hasher, &demo_pos);
+    let demo_open_msg = harness::repo::open_message(&hasher, &demo_pos, 0, 0);
+    let empty_state_root = harness::repo::L2State::new().state_root(&hasher);
+
     // The demo scenario shared with fixtures/batch_n4 (meta.json).
     let alice = Keypair::from_sk(ark_grumpkin::Fr::from(101u64));
     let bob = Keypair::from_sk(ark_grumpkin::Fr::from(202u64));
@@ -329,6 +475,16 @@ fn vectors_json() {
         "root_leaf_at_5": to_hex(&root5),
         "dep2_fold_0_1234_coll_77": to_hex(&dep2_fold),
         "wd2_fold_0_1234_coll_77": to_hex(&wd2_fold),
+        "empty_state_root": to_hex(&empty_state_root),
+        "repo_demo_position": {
+            "borrower_pk_x": to_hex(&demo_pos.borrower_pk_x),
+            "lender_pk_x": to_hex(&demo_pos.lender_pk_x),
+            "cash": "1000000", "coll": "3000000",
+            "rate_bps": 430, "haircut_bps": 200,
+            "open_ts": 1700000000u64, "maturity_ts": 1700086400u64,
+            "pos_leaf": to_hex(&demo_pos_leaf),
+            "open_msg_n0_n0": to_hex(&demo_open_msg),
+        },
         "pad": {
             "pk_x": to_hex(&pad_kp.pk_x()),
             "pk_y": to_hex(&pad_kp.pk_y()),

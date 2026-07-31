@@ -32,6 +32,7 @@
   },
   "dep2_fold_0_1234_coll_77": "0x0df829c73338b1e69592367d91fdb919da8f5cb28dcf0be7c762563b2a53a21f",
   "empty_root_d8": "0x067243231eddf4222f3911defbba7705aff06ed45960b27f6f91319196ef97e1",
+  "empty_state_root": "0x1849b85f3c693693e732dfc4577217acc18295193bede09ce8b97ad910310972",
   "hash2_1_2": "0x038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383",
   "hash4_1_2_3_4": "0x130bf204a32cac1f0ace56c78b731aa3809f06df2731ebcf6b3464a15788b1b9",
   "leaf_1234_100_40_0": "0x2cadc331fd61be1dc52aa0bf0d748b484e0ad61410836487abc8cc50691db5fd",
@@ -42,6 +43,18 @@
     "r_y": "0x2be1ab9ccce96a8deeb82e85a35cc26804269db7ea57bc0e0afa3b835dfcff73",
     "s_hi": "0x000000000000000000000000000000002ed87ed8cf30832f5f7b93ee4d5afd52",
     "s_lo": "0x000000000000000000000000000000008312af54a4f4b07d782dc23d06ef43f2"
+  },
+  "repo_demo_position": {
+    "borrower_pk_x": "0x13d84dfee2bd99f26530c590cd8c011979328f1fa149234b19fea91510f94ebb",
+    "cash": "1000000",
+    "coll": "3000000",
+    "haircut_bps": 200,
+    "lender_pk_x": "0x1f2cbd75183a0cced1f2b4d1121a647b3b421baed26e463b2565b7972ae1a83c",
+    "maturity_ts": 1700086400,
+    "open_msg_n0_n0": "0x22f0148fc13d2274e62316f4d9f1bd5ca5cb5e6cdc41a2e411cdb3d3d97f86f2",
+    "open_ts": 1700000000,
+    "pos_leaf": "0x00de6a18143e44a098d307539f45f84ec7d4b51d5ab9e77c293da71104dd4d63",
+    "rate_bps": 430
   },
   "root_leaf_at_5": "0x2c3f024049095d0b2854eb0e4dc51807bbb8faa3dd3daafbe9ad81bfaa010c8d",
   "tx_message_alice_bob_cash_200_0": "0x0f35314dd06fc9cfecfcf75bc389140c9413903a7c79900bfc55ac1cd20e46f8",

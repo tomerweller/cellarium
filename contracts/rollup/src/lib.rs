@@ -1,6 +1,9 @@
 //! Repo ZK-rollup contract (multi-asset validium): custody of two SEP-41
-//! tokens — cash (XLM) and collateral (tUST) — with the state root advanced
-//! by UltraHonk-proven batches (DESIGN.md, PLAN.md).
+//! tokens — cash (XLM) and collateral (tUST) — with the combined state root
+//! (accounts + positions) advanced by UltraHonk-proven batches carrying the
+//! full 7-public-input interface: old/new state roots, deposit/withdraw
+//! folds, DA commitment, batch timestamp (one-sided window) and the oracle
+//! price (DESIGN.md, PLAN.md).
 #![no_std]
 
 pub mod events;
@@ -8,7 +11,8 @@ pub mod publics;
 pub mod storage;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Vec,
+    contract, contractclient, contracterror, contractimpl, contracttype, token, Address, Bytes,
+    BytesN, Env, Vec,
 };
 pub use storage::{PendingDeposit, ASSET_CASH, ASSET_COLL};
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
@@ -24,6 +28,14 @@ pub const MAX_WITHDRAWALS: u32 = 8;
 /// Native XLM qualifies (~1.05e18 stroops < u64::MAX ~1.84e19); the mock
 /// tUST token enforces the cap in its mint (contracts/tust).
 pub const MAX_AMOUNT: i128 = (u64::MAX as i128) + 1;
+
+/// Claimed batch timestamp must satisfy claimed <= ledger.timestamp() and
+/// ledger.timestamp() - claimed <= this window (one-sided, past only:
+/// premature default/liquidation via a future-dated batch is impossible;
+/// PLAN.md 6.1.3).
+pub const MAX_TS_LAG_SECS: u64 = 60;
+/// Oracle price must be at most this old at submission (PLAN.md 1.5).
+pub const MAX_PRICE_AGE_SECS: u64 = 300;
 
 /// Public padding account x-coordinate (circuits PAD_PK_X / sk=7·G). Deposits
 /// to this key are rejected — the secret is public, so any credit would be
@@ -49,12 +61,35 @@ pub enum RollupError {
     ReservedPaddingPk = 9,
     /// Asset id out of range (must be 0 = cash or 1 = coll).
     InvalidAsset = 10,
+    /// Claimed batch_ts is in the future or lags the ledger by > 60s.
+    BadTimestamp = 11,
+    /// Oracle has no price or it is older than MAX_PRICE_AGE_SECS.
+    StalePrice = 12,
+}
+
+/// Mirror of the oracle's PriceData (contracts/oracle); field names must
+/// match for the contracttype map encoding.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PriceData {
+    pub price: i128,
+    pub timestamp: u64,
+}
+
+/// Minimal client for the mock oracle's read surface.
+#[contractclient(name = "OracleClient")]
+pub trait OracleInterface {
+    fn lastprice(env: Env) -> Option<PriceData>;
 }
 
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct BatchEnvelope {
     pub new_root: BytesN<32>,
+    /// Claimed batch timestamp (6th public input): the value the circuit's
+    /// time logic uses. Bound one-sidedly to the ledger clock (see
+    /// MAX_TS_LAG_SECS) so proving isn't racing the ledger.
+    pub batch_ts: u64,
     /// How many entries of each FIFO deposit queue this batch consumes.
     /// The proven deposit fold covers the cash prefix, then the coll prefix.
     pub deposit_count_cash: u32,
@@ -85,15 +120,18 @@ impl RollupContract {
         env: Env,
         token_cash: Address,
         token_coll: Address,
+        oracle: Address,
         vk: Bytes,
         genesis_root: BytesN<32>,
     ) -> Result<(), RollupError> {
-        // Parse-validate the VK. 5 user PIs (old_root, new_root,
-        // deposit_hash, withdraw_hash, da_commitment) + 16 pairing.
+        // Parse-validate the VK. 7 user PIs (old/new state roots,
+        // deposit_hash, withdraw_hash, da_commitment, batch_ts, price)
+        // + 16 pairing.
         UltraHonkVerifier::new(&env, &vk).map_err(|_| RollupError::InvalidVerificationKey)?;
         storage::set_vk(&env, &vk);
         storage::set_token(&env, ASSET_CASH, &token_cash);
         storage::set_token(&env, ASSET_COLL, &token_coll);
+        storage::set_oracle(&env, &oracle);
         storage::set_root(&env, &genesis_root);
         Ok(())
     }
@@ -160,7 +198,23 @@ impl RollupContract {
             }
         }
 
-        // --- assemble the 5 public inputs (160 bytes), all derived on-chain ---
+        // --- timestamp: one-sided past-only window (PLAN.md 6.1.3) ---
+        let ledger_ts = env.ledger().timestamp();
+        if envelope.batch_ts > ledger_ts || ledger_ts - envelope.batch_ts > MAX_TS_LAG_SECS {
+            return Err(RollupError::BadTimestamp);
+        }
+
+        // --- price: read the oracle inside this invocation (PLAN.md 1.5) ---
+        let oracle = OracleClient::new(&env, &storage::get_oracle(&env));
+        let price_data = oracle.lastprice().ok_or(RollupError::StalePrice)?;
+        if price_data.timestamp + MAX_PRICE_AGE_SECS < ledger_ts {
+            return Err(RollupError::StalePrice);
+        }
+        if price_data.price <= 0 || price_data.price >= MAX_AMOUNT {
+            return Err(RollupError::StalePrice);
+        }
+
+        // --- assemble the 7 public inputs (224 bytes), all derived on-chain ---
         let old_root = storage::get_root(&env);
 
         // Deposit fold: cash-queue prefix first, then coll-queue prefix
@@ -194,6 +248,8 @@ impl RollupContract {
         publics::append_field(&env, &mut pis, &deposit_hash);
         publics::append_field(&env, &mut pis, &withdraw_hash);
         publics::append_field(&env, &mut pis, &envelope.da_commitment);
+        publics::append_field(&env, &mut pis, &publics::u64_word(&env, envelope.batch_ts));
+        publics::append_field(&env, &mut pis, &publics::u128_word(&env, price_data.price as u128));
 
         // --- verify ---
         let vk = storage::get_vk(&env);
@@ -268,6 +324,10 @@ impl RollupContract {
 
     pub fn token(env: Env, asset: u32) -> Address {
         storage::get_token(&env, asset)
+    }
+
+    pub fn oracle(env: Env) -> Address {
+        storage::get_oracle(&env)
     }
 }
 

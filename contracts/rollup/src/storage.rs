@@ -9,6 +9,8 @@ pub const ASSET_COLL: u32 = 1;
 pub enum DataKey {
     /// Custody token contract per asset id.
     Token(u32),
+    /// Mock price oracle contract (PLAN.md 1.6).
+    Oracle,
     Vk,
     Root,
     BatchNum,
@@ -32,6 +34,14 @@ pub fn set_token(env: &Env, asset: u32, token: &Address) {
 
 pub fn get_token(env: &Env, asset: u32) -> Address {
     env.storage().instance().get(&DataKey::Token(asset)).unwrap()
+}
+
+pub fn set_oracle(env: &Env, oracle: &Address) {
+    env.storage().instance().set(&DataKey::Oracle, oracle);
+}
+
+pub fn get_oracle(env: &Env) -> Address {
+    env.storage().instance().get(&DataKey::Oracle).unwrap()
 }
 
 pub fn set_vk(env: &Env, vk: &Bytes) {

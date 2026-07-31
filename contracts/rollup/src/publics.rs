@@ -97,3 +97,19 @@ pub fn address_to_field(env: &Env, addr: &Address) -> BytesN<32> {
 }
 
 pub const FR_ZERO_WORD: [u8; 32] = [0u8; 32];
+
+/// A u64 as a 32-byte big-endian field word (batch_ts public input).
+pub fn u64_word(env: &Env, v: u64) -> BytesN<32> {
+    let mut arr = [0u8; 32];
+    arr[24..].copy_from_slice(&v.to_be_bytes());
+    BytesN::from_array(env, &arr)
+}
+
+/// A u128 as a 32-byte big-endian field word (price public input; the
+/// caller has validated it below 2^64 via MAX_AMOUNT, so this is always
+/// canonical).
+pub fn u128_word(env: &Env, v: u128) -> BytesN<32> {
+    let mut arr = [0u8; 32];
+    arr[16..].copy_from_slice(&v.to_be_bytes());
+    BytesN::from_array(env, &arr)
+}

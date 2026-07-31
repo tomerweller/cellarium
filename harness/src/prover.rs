@@ -2,6 +2,7 @@
 
 use crate::batch::BatchWitness;
 use crate::poseidon::{fr_from_u64, to_hex, Fr};
+use crate::repo::RepoBatchWitness;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
@@ -30,7 +31,13 @@ pub fn to_prover_toml(w: &BatchWitness) -> String {
     let _ = writeln!(out, "deposit_hash = {}", fr_lit(&w.deposit_hash));
     let _ = writeln!(out, "withdraw_hash = {}", fr_lit(&w.withdraw_hash));
     let _ = writeln!(out, "da_commitment = {}", fr_lit(&w.da_commitment));
-    for d in &w.deposits {
+    emit_deposits(&mut out, &w.deposits);
+    emit_txs(&mut out, &w.txs);
+    out
+}
+
+fn emit_deposits(out: &mut String, deposits: &[crate::batch::DepositEntry]) {
+    for d in deposits {
         let _ = writeln!(out, "\n[[deposits]]");
         let _ = writeln!(out, "pk_x = {}", fr_lit(&d.pk_x));
         let _ = writeln!(out, "asset = {}", u64_lit(d.asset as u64));
@@ -43,7 +50,10 @@ pub fn to_prover_toml(w: &BatchWitness) -> String {
         let _ = writeln!(out, "siblings = {}", siblings_lit(&d.siblings));
         let _ = writeln!(out, "is_active = {}", bool_lit(d.is_active));
     }
-    for t in &w.txs {
+}
+
+fn emit_txs(out: &mut String, txs: &[crate::batch::TxEntry]) {
+    for t in txs {
         let _ = writeln!(out, "\n[[txs]]");
         let _ = writeln!(out, "from_pk_x = {}", fr_lit(&t.from_pk_x));
         let _ = writeln!(out, "from_pk_y = {}", fr_lit(&t.from_pk_y));
@@ -69,6 +79,61 @@ pub fn to_prover_toml(w: &BatchWitness) -> String {
         let _ = writeln!(out, "s_lo = {}", fr_lit(&s_lo));
         let _ = writeln!(out, "s_hi = {}", fr_lit(&s_hi));
     }
+}
+
+fn sig_toml(out: &mut String, table: &str, sig: &crate::keys::Signature) {
+    let (s_lo, s_hi) = sig.s_limbs();
+    let _ = writeln!(out, "[{table}]");
+    let _ = writeln!(out, "r_x = {}", fr_lit(&sig.r_x));
+    let _ = writeln!(out, "r_y = {}", fr_lit(&sig.r_y));
+    let _ = writeln!(out, "s_lo = {}", fr_lit(&s_lo));
+    let _ = writeln!(out, "s_hi = {}", fr_lit(&s_hi));
+}
+
+/// Render the repo batch witness as a Prover.toml matching
+/// batch_repo/src/main.nr (7 public inputs + private root openings).
+pub fn to_repo_prover_toml(w: &RepoBatchWitness) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, "old_state_root = {}", fr_lit(&w.old_state_root));
+    let _ = writeln!(out, "new_state_root = {}", fr_lit(&w.new_state_root));
+    let _ = writeln!(out, "deposit_hash = {}", fr_lit(&w.deposit_hash));
+    let _ = writeln!(out, "withdraw_hash = {}", fr_lit(&w.withdraw_hash));
+    let _ = writeln!(out, "da_commitment = {}", fr_lit(&w.da_commitment));
+    let _ = writeln!(out, "batch_ts = {}", u64_lit(w.batch_ts));
+    let _ = writeln!(out, "price = {}", u64_lit(w.price));
+    let _ = writeln!(out, "old_acct_root = {}", fr_lit(&w.old_acct_root));
+    let _ = writeln!(out, "old_pos_root = {}", fr_lit(&w.old_pos_root));
+    emit_deposits(&mut out, &w.deposits);
+    for o in &w.opens {
+        let _ = writeln!(out, "\n[[opens]]");
+        let _ = writeln!(out, "borrower_pk_x = {}", fr_lit(&o.borrower_pk_x));
+        let _ = writeln!(out, "borrower_pk_y = {}", fr_lit(&o.borrower_pk_y));
+        let _ = writeln!(out, "borrower_index = {}", u64_lit(o.borrower_index as u64));
+        let _ = writeln!(out, "borrower_cash = {}", u64_lit(o.borrower_cash));
+        let _ = writeln!(out, "borrower_coll = {}", u64_lit(o.borrower_coll));
+        let _ = writeln!(out, "borrower_nonce = {}", u64_lit(o.borrower_nonce));
+        let _ = writeln!(out, "borrower_siblings = {}", siblings_lit(&o.borrower_siblings));
+        let _ = writeln!(out, "lender_pk_x = {}", fr_lit(&o.lender_pk_x));
+        let _ = writeln!(out, "lender_pk_y = {}", fr_lit(&o.lender_pk_y));
+        let _ = writeln!(out, "lender_index = {}", u64_lit(o.lender_index as u64));
+        let _ = writeln!(out, "lender_cash = {}", u64_lit(o.lender_cash));
+        let _ = writeln!(out, "lender_coll = {}", u64_lit(o.lender_coll));
+        let _ = writeln!(out, "lender_nonce = {}", u64_lit(o.lender_nonce));
+        let _ = writeln!(out, "lender_siblings = {}", siblings_lit(&o.lender_siblings));
+        let _ = writeln!(out, "cash = {}", u64_lit(o.cash));
+        let _ = writeln!(out, "coll = {}", u64_lit(o.coll));
+        let _ = writeln!(out, "rate_bps = {}", u64_lit(o.rate_bps as u64));
+        let _ = writeln!(out, "haircut_bps = {}", u64_lit(o.haircut_bps as u64));
+        let _ = writeln!(out, "open_ts = {}", u64_lit(o.open_ts));
+        let _ = writeln!(out, "maturity_ts = {}", u64_lit(o.maturity_ts));
+        let _ = writeln!(out, "pos_index = {}", u64_lit(o.pos_index as u64));
+        let _ = writeln!(out, "pos_old_leaf = {}", fr_lit(&o.pos_old_leaf));
+        let _ = writeln!(out, "pos_siblings = {}", siblings_lit(&o.pos_siblings));
+        let _ = writeln!(out, "is_active = {}", bool_lit(o.is_active));
+        sig_toml(&mut out, "opens.borrower_sig", &o.borrower_sig);
+        sig_toml(&mut out, "opens.lender_sig", &o.lender_sig);
+    }
+    emit_txs(&mut out, &w.txs);
     out
 }
 

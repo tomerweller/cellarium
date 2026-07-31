@@ -1601,6 +1601,7 @@ dependencies = [
 name = "rollup"
 version = "0.1.0"
 dependencies = [
+ "oracle",
  "serde_json",
  "soroban-poseidon",
  "soroban-sdk",

@@ -7,6 +7,10 @@
 //!   wallet-sim deposit <l2_pk_x_hex> <asset> <amount>   (funder = SEQ key)
 //!   wallet-sim send <from_sk> <to_pk_x_hex> <asset> <amount> <nonce>
 //!   wallet-sim withdraw <from_sk> <dest_strkey> <asset> <amount> <nonce>
+//!   wallet-sim intent <initiator_sk> <role> <counterparty_sk> <cash> <coll> <rate_bps> <haircut_bps> <term_secs>
+//!     (role = borrower|lender for the INITIATOR; nonces fetched live)
+//!   wallet-sim accept <acceptor_sk> <intent_id>
+//!   wallet-sim positions <pk_x_hex>
 //!
 //! Env: SORIBIUM_URL (default http://127.0.0.1:8080), CONTRACT_ID, SEQ_KEY
 //! (stellar CLI identity name or secret), plus standard stellar network vars.
@@ -25,13 +29,31 @@ fn keypair(sk: u64) -> Keypair {
     Keypair::from_sk(ark_grumpkin::Fr::from(sk))
 }
 
-fn post_tx(body: &serde_json::Value) {
-    let url = format!("{}/tx", seq_url());
+fn post_json(path: &str, body: &serde_json::Value) -> String {
+    let url = format!("{}{}", seq_url(), path);
     let out = std::process::Command::new("curl")
         .args(["-sS", "-X", "POST", &url, "-H", "Content-Type: application/json", "-d", &body.to_string()])
         .output()
         .expect("curl");
-    println!("{}", String::from_utf8_lossy(&out.stdout));
+    let s = String::from_utf8_lossy(&out.stdout).to_string();
+    println!("{s}");
+    s
+}
+
+fn post_tx(body: &serde_json::Value) {
+    post_json("/tx", body);
+}
+
+fn get_json(path: &str) -> serde_json::Value {
+    let url = format!("{}{}", seq_url(), path);
+    let out = std::process::Command::new("curl").args(["-sS", &url]).output().expect("curl");
+    serde_json::from_slice(&out.stdout).expect("json")
+}
+
+/// Live pending nonce for an L2 account (0 if the account doesn't exist yet).
+fn pending_nonce(pk_x_hex: &str) -> u64 {
+    let v = get_json(&format!("/account/{pk_x_hex}"));
+    v["pending_nonce"].as_u64().unwrap_or(0)
 }
 
 fn sig_json(sig: &harness::keys::Signature) -> serde_json::Value {
@@ -120,8 +142,96 @@ fn main() {
                 "sig": sig_json(&sig),
             }));
         }
+        "intent" => {
+            use harness::repo::{open_message, Position};
+            let initiator = keypair(args[2].parse().unwrap());
+            let role = args[3].as_str();
+            let counterparty = keypair(args[4].parse().unwrap());
+            let cash: u64 = args[5].parse().unwrap();
+            let coll: u64 = args[6].parse().unwrap();
+            let rate_bps: u32 = args[7].parse().unwrap();
+            let haircut_bps: u32 = args[8].parse().unwrap();
+            let term_secs: u64 = args[9].parse().unwrap();
+
+            let (borrower, lender) = match role {
+                "borrower" => (&initiator, &counterparty),
+                "lender" => (&counterparty, &initiator),
+                other => panic!("role must be borrower|lender, got {other}"),
+            };
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let position = Position {
+                borrower_pk_x: borrower.pk_x(),
+                lender_pk_x: lender.pk_x(),
+                cash,
+                coll,
+                rate_bps,
+                haircut_bps,
+                open_ts: now,
+                maturity_ts: now + term_secs,
+            };
+            let borrower_nonce = pending_nonce(&to_hex(&borrower.pk_x()));
+            let lender_nonce = pending_nonce(&to_hex(&lender.pk_x()));
+            let msg = open_message(&hasher, &position, borrower_nonce, lender_nonce);
+            let sig = sign(&hasher, &initiator, msg, &mut rand::thread_rng());
+            post_json("/intent", &serde_json::json!({
+                "initiator": role,
+                "borrower_pk_x": to_hex(&borrower.pk_x()),
+                "borrower_pk_y": to_hex(&borrower.pk_y()),
+                "lender_pk_x": to_hex(&lender.pk_x()),
+                "lender_pk_y": to_hex(&lender.pk_y()),
+                "cash": cash.to_string(),
+                "coll": coll.to_string(),
+                "rate_bps": rate_bps,
+                "haircut_bps": haircut_bps,
+                "open_ts": now,
+                "maturity_ts": now + term_secs,
+                "borrower_nonce": borrower_nonce,
+                "lender_nonce": lender_nonce,
+                "sig": sig_json(&sig),
+            }));
+        }
+        "accept" => {
+            use harness::repo::{open_message, Position};
+            let acceptor = keypair(args[2].parse().unwrap());
+            let intent_id: i64 = args[3].parse().unwrap();
+            // Find the intent among those awaiting OUR countersignature.
+            let listing = get_json(&format!("/intents/{}", to_hex(&acceptor.pk_x())));
+            let intent = listing["incoming"]
+                .as_array()
+                .and_then(|a| a.iter().find(|i| i["id"].as_i64() == Some(intent_id)))
+                .unwrap_or_else(|| panic!("intent {intent_id} not found in incoming"))
+                .clone();
+            let position = Position {
+                borrower_pk_x: parse_hex(intent["borrower_pk_x"].as_str().unwrap()),
+                lender_pk_x: parse_hex(intent["lender_pk_x"].as_str().unwrap()),
+                cash: intent["cash"].as_str().unwrap().parse().unwrap(),
+                coll: intent["coll"].as_str().unwrap().parse().unwrap(),
+                rate_bps: intent["rate_bps"].as_u64().unwrap() as u32,
+                haircut_bps: intent["haircut_bps"].as_u64().unwrap() as u32,
+                open_ts: intent["open_ts"].as_u64().unwrap(),
+                maturity_ts: intent["maturity_ts"].as_u64().unwrap(),
+            };
+            let msg = open_message(
+                &hasher,
+                &position,
+                intent["borrower_nonce"].as_u64().unwrap(),
+                intent["lender_nonce"].as_u64().unwrap(),
+            );
+            let sig = sign(&hasher, &acceptor, msg, &mut rand::thread_rng());
+            post_json(
+                &format!("/intent/{intent_id}/accept"),
+                &serde_json::json!({ "sig": sig_json(&sig) }),
+            );
+        }
+        "positions" => {
+            let v = get_json(&format!("/positions/{}", &args[2]));
+            println!("{}", serde_json::to_string_pretty(&v).unwrap());
+        }
         _ => {
-            eprintln!("usage: wallet-sim pk|deposit|send|withdraw ...");
+            eprintln!("usage: wallet-sim pk|deposit|send|withdraw|intent|accept|positions ...");
             std::process::exit(2);
         }
     }

@@ -7,6 +7,7 @@ export interface Params {
   contract_id: string;
   token_id: string;
   tust_id: string;
+  oracle_id?: string;
   network_passphrase: string;
   rpc_url: string;
   batch: { deposits: number; txs: number };
@@ -30,6 +31,7 @@ export interface Status {
   root: string;
   batch_num: number;
   pending_txs: number;
+  pending_opens?: number;
   pending_deposits: number;
   contract_id: string;
   inflight_batch: { batch_num: number; status: string } | null;
@@ -39,7 +41,7 @@ export interface Status {
 export interface HistoryEntry {
   id: number;
   batch_num: number | null;
-  kind: 'deposit' | 'transfer_in' | 'transfer_out' | 'withdraw';
+  kind: 'deposit' | 'transfer_in' | 'transfer_out' | 'withdraw' | 'repo_open';
   counterparty: string | null;
   asset: number;
   amount: string;

@@ -3,7 +3,7 @@
 //! hex (canonical); amounts = decimal strings; addresses = strkey.
 
 use crate::config::Config;
-use crate::engine::{ApiError, Command, WireTx};
+use crate::engine::{ApiError, Command, WireAccept, WireIntent, WireTx};
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
@@ -144,8 +144,18 @@ pub fn router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route(
             "/tx",
-            post(post_tx).route_layer(middleware::from_fn_with_state(limiter, rate_limit)),
+            post(post_tx).route_layer(middleware::from_fn_with_state(limiter.clone(), rate_limit)),
         )
+        .route(
+            "/intent",
+            post(post_intent).route_layer(middleware::from_fn_with_state(limiter.clone(), rate_limit)),
+        )
+        .route(
+            "/intent/{id}/accept",
+            post(post_accept).route_layer(middleware::from_fn_with_state(limiter, rate_limit)),
+        )
+        .route("/intents/{pk_x}", get(get_intents))
+        .route("/positions/{pk_x}", get(get_positions))
         .route("/account/{pk_x}", get(get_account))
         .route("/da/{batch_num}", get(get_da))
         .route("/status", get(get_status))
@@ -166,6 +176,41 @@ async fn post_tx(
 ) -> Result<impl IntoResponse, ApiError> {
     let receipt = ask(&st.engine, |reply| Command::SubmitTx(tx, reply)).await?;
     Ok(Json(receipt))
+}
+
+async fn post_intent(
+    State(st): State<AppState>,
+    Json(intent): Json<WireIntent>,
+) -> Result<impl IntoResponse, ApiError> {
+    let receipt = ask(&st.engine, |reply| Command::SubmitIntent(intent, reply)).await?;
+    Ok(Json(receipt))
+}
+
+async fn post_accept(
+    State(st): State<AppState>,
+    Path(id): Path<i64>,
+    Json(accept): Json<WireAccept>,
+) -> Result<impl IntoResponse, ApiError> {
+    let receipt = ask(&st.engine, |reply| Command::AcceptIntent(id, accept, reply)).await?;
+    Ok(Json(receipt))
+}
+
+/// Intents involving this pk (incoming = awaiting THEIR countersignature).
+/// Prototype caveat (PLAN.md 6.2): filtered but unauthenticated.
+async fn get_intents(
+    State(st): State<AppState>,
+    Path(pk_x): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let intents = ask(&st.engine, |reply| Command::GetIntents(pk_x, reply)).await?;
+    Ok(Json(intents))
+}
+
+async fn get_positions(
+    State(st): State<AppState>,
+    Path(pk_x): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let positions = ask(&st.engine, |reply| Command::GetPositions(pk_x, reply)).await?;
+    Ok(Json(serde_json::json!({ "positions": positions })))
 }
 
 async fn get_account(
@@ -207,10 +252,11 @@ async fn get_params(State(st): State<AppState>) -> impl IntoResponse {
         "contract_id": st.cfg.contract_id,
         "token_id": st.cfg.token_id,
         "tust_id": st.cfg.tust_id,
+        "oracle_id": st.cfg.oracle_id,
         "network_passphrase": st.cfg.network_passphrase,
         "rpc_url": st.cfg.rpc_url,
-        "batch": { "deposits": st.cfg.deposit_slots, "txs": st.cfg.tx_slots },
+        "batch": { "deposits": st.cfg.deposit_slots, "opens": st.cfg.open_slots, "txs": st.cfg.tx_slots },
         "assets": { "cash": 0, "coll": 1 },
-        "domains": { "leaf": 1, "tx": 2, "sig": 3, "addr": 6, "da": 7, "dep2": 11, "wd2": 12 },
+        "domains": { "leaf": 1, "tx": 2, "sig": 3, "addr": 6, "da": 7, "pos": 8, "open": 9, "close": 10, "dep2": 11, "wd2": 12 },
     }))
 }

@@ -18,7 +18,7 @@ IDENTITY=soribium-seq
 # The circuit determines the contract's immutable VK — pick the largest batch
 # whose prove time fits the 5s-cadence budget on the PROVER hardware
 # (docs/PROVING.md §3.5).
-CIRCUIT="${CIRCUIT:-batch_n16}"
+CIRCUIT="${CIRCUIT:-batch_repo}"
 
 echo "==> sequencer identity"
 stellar keys generate "$IDENTITY" --network "$NET" --fund 2>/dev/null || stellar keys fund "$IDENTITY" --network "$NET" 2>/dev/null || true
@@ -73,13 +73,13 @@ stellar contract invoke --id "$ORACLE" --source "$ORACLE_ADMIN_IDENTITY" --netwo
   set_price --price "$INITIAL_PRICE" >/dev/null
 echo "    initial price set: $INITIAL_PRICE"
 
-echo "==> genesis root (empty depth-8 tree)"
+echo "==> genesis state root (both trees empty)"
 GENESIS=$(cargo run -q -p sequencer -- genesis-root)
 GENESIS_HEX=${GENESIS#0x}
 
 echo "==> deploying rollup contract"
 ROLLUP=$(stellar contract deploy --wasm "$WASM" --source "$IDENTITY" --network "$NET" -- \
-  --token_cash "$TOKEN" --token_coll "$TUST" --vk "$VK" --genesis_root "$GENESIS_HEX")
+  --token_cash "$TOKEN" --token_coll "$TUST" --oracle "$ORACLE" --vk "$VK" --genesis_root "$GENESIS_HEX")
 echo "    $ROLLUP"
 
 echo "==> writing .env"

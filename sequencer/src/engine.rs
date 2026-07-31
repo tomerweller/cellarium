@@ -11,10 +11,14 @@
 use crate::config::Config;
 use crate::db;
 use crate::hexutil::{fr_hex, parse_fr};
-use harness::batch::{build_batch, tx_message, BuildError, DepositRequest, SignedTx};
+use harness::batch::{tx_message, BuildError, DepositRequest, SignedTx};
 use harness::keys::{pk_from_coords, verify, Signature};
 use harness::l1::address_to_field;
-use harness::poseidon::{Fr, Hasher, FR_ZERO};
+use harness::poseidon::{fr_from_u64, Fr, Hasher, FR_ZERO};
+use harness::repo::{
+    build_repo_batch, open_message, open_record, L2State, OpenRequest, PosTree, Position,
+    RepoBuildError,
+};
 use harness::tree::{Account, Tree};
 use rusqlite::Connection;
 use std::sync::mpsc;
@@ -28,6 +32,43 @@ pub struct WireSig {
     pub r_y: String,
     pub s_lo: String,
     pub s_hi: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WireIntent {
+    /// Which role the initiator (and signer) of this intent plays.
+    pub initiator: String, // "borrower" | "lender"
+    pub borrower_pk_x: String,
+    pub borrower_pk_y: String,
+    pub lender_pk_x: String,
+    pub lender_pk_y: String,
+    pub cash: String,
+    pub coll: String,
+    pub rate_bps: u32,
+    pub haircut_bps: u32,
+    pub open_ts: u64,
+    pub maturity_ts: u64,
+    pub borrower_nonce: u64,
+    pub lender_nonce: u64,
+    pub sig: WireSig,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WireAccept {
+    pub sig: WireSig,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PositionInfo {
+    pub slot: u32,
+    pub borrower_pk_x: String,
+    pub lender_pk_x: String,
+    pub cash: String,
+    pub coll: String,
+    pub rate_bps: u32,
+    pub haircut_bps: u32,
+    pub open_ts: u64,
+    pub maturity_ts: u64,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -70,6 +111,7 @@ pub struct StatusInfo {
     pub root: String,
     pub batch_num: u64,
     pub pending_txs: u64,
+    pub pending_opens: u64,
     pub pending_deposits: u64,
     pub contract_id: String,
     pub inflight_batch: Option<InflightInfo>,
@@ -121,6 +163,12 @@ pub struct BatchJob {
 
 pub enum Command {
     SubmitTx(WireTx, oneshot::Sender<Result<TxReceipt, ApiError>>),
+    SubmitIntent(WireIntent, oneshot::Sender<Result<TxReceipt, ApiError>>),
+    /// (intent id, counterparty signature)
+    AcceptIntent(i64, WireAccept, oneshot::Sender<Result<TxReceipt, ApiError>>),
+    /// Intents where this pk is counterparty or initiator.
+    GetIntents(String, oneshot::Sender<Result<serde_json::Value, ApiError>>),
+    GetPositions(String, oneshot::Sender<Result<Vec<PositionInfo>, ApiError>>),
     GetAccount(String, oneshot::Sender<Result<AccountInfo, ApiError>>),
     GetStatus(oneshot::Sender<StatusInfo>),
     GetHistory(String, oneshot::Sender<Result<Vec<db::HistoryEntry>, ApiError>>),
@@ -129,7 +177,9 @@ pub enum Command {
     /// From the watcher: newly observed L1 deposits (asset, seq, pk_x, amount).
     ObservedDeposits(Vec<(u32, u64, Fr, u64)>, oneshot::Sender<Result<(), ApiError>>),
     /// From the batcher tick: build a batch if trigger conditions hold.
-    TryBuildBatch(oneshot::Sender<Result<Option<BatchJob>, ApiError>>),
+    /// Carries the current oracle price (fetched by the batcher) — bound as
+    /// the 7th public input.
+    TryBuildBatch(u64, oneshot::Sender<Result<Option<BatchJob>, ApiError>>),
     /// From the batcher: bb finished; validate + persist the proof.
     RecordProof {
         batch_num: u64,
@@ -150,16 +200,16 @@ pub enum Command {
 pub struct Engine {
     cfg: Config,
     conn: Connection,
-    tree: Tree,
+    state: L2State,
     chain_synced: bool,
 }
 
-pub fn spawn(cfg: Config, conn: Connection, tree: Tree, chain_synced: bool) -> mpsc::Sender<Command> {
+pub fn spawn(cfg: Config, conn: Connection, state: L2State, chain_synced: bool) -> mpsc::Sender<Command> {
     let (tx, rx) = mpsc::channel::<Command>();
     std::thread::Builder::new()
         .name("engine".into())
         .spawn(move || {
-            let mut engine = Engine { cfg, conn, tree, chain_synced };
+            let mut engine = Engine { cfg, conn, state, chain_synced };
             while let Ok(cmd) = rx.recv() {
                 engine.handle(cmd);
             }
@@ -173,6 +223,18 @@ impl Engine {
         match cmd {
             Command::SubmitTx(tx, reply) => {
                 let _ = reply.send(self.submit_tx(tx));
+            }
+            Command::SubmitIntent(intent, reply) => {
+                let _ = reply.send(self.submit_intent(intent));
+            }
+            Command::AcceptIntent(id, accept, reply) => {
+                let _ = reply.send(self.accept_intent(id, accept));
+            }
+            Command::GetIntents(pk_hex, reply) => {
+                let _ = reply.send(self.get_intents(&pk_hex));
+            }
+            Command::GetPositions(pk_hex, reply) => {
+                let _ = reply.send(self.get_positions(&pk_hex));
             }
             Command::GetAccount(pk_hex, reply) => {
                 let _ = reply.send(self.get_account(&pk_hex));
@@ -192,8 +254,8 @@ impl Engine {
             Command::ObservedDeposits(deps, reply) => {
                 let _ = reply.send(self.observed_deposits(deps));
             }
-            Command::TryBuildBatch(reply) => {
-                let _ = reply.send(self.try_build_batch());
+            Command::TryBuildBatch(price, reply) => {
+                let _ = reply.send(self.try_build_batch(price));
             }
             Command::RecordProof { batch_num, proof, public_inputs, reply } => {
                 let _ = reply.send(self.record_proof(batch_num, proof, public_inputs));
@@ -232,10 +294,11 @@ impl Engine {
     fn get_account(&self, pk_hex: &str) -> Result<AccountInfo, ApiError> {
         let hasher = Hasher::new();
         let pk_x = parse_fr(pk_hex).map_err(|e| ApiError::BadField(format!("pk_x: {e:?}")))?;
-        let index = self.tree.find(&pk_x).ok_or(ApiError::AccountUnknown)?;
-        let account = self.tree.get(index).unwrap().clone();
-        let (siblings, _) = self.tree.path(&hasher, index);
+        let index = self.state.accounts.find(&pk_x).ok_or(ApiError::AccountUnknown)?;
+        let account = self.state.accounts.get(index).unwrap().clone();
+        let (siblings, _) = self.state.accounts.path(&hasher, index);
         let pending = db::mempool_pending_for(&self.conn, &pk_x)?;
+        let pending_opens = db::opens_pending_for(&self.conn, &pk_x)?;
         let pending_out_cash: u64 = pending.iter().filter(|t| t.asset == 0).map(|t| t.amount).sum();
         let pending_out_coll: u64 = pending.iter().filter(|t| t.asset == 1).map(|t| t.amount).sum();
         Ok(AccountInfo {
@@ -244,10 +307,10 @@ impl Engine {
             cash: account.cash.to_string(),
             coll: account.coll.to_string(),
             nonce: account.nonce,
-            pending_nonce: account.nonce + pending.len() as u64,
+            pending_nonce: account.nonce + pending.len() as u64 + pending_opens,
             pending_out_cash: pending_out_cash.to_string(),
             pending_out_coll: pending_out_coll.to_string(),
-            root: fr_hex(&self.tree.root(&hasher)),
+            root: fr_hex(&self.state.state_root(&hasher)),
             batch_num: self.confirmed_batch_num(),
             siblings: siblings.iter().map(fr_hex).collect(),
         })
@@ -256,9 +319,10 @@ impl Engine {
     fn get_status(&self) -> StatusInfo {
         let hasher = Hasher::new();
         StatusInfo {
-            root: fr_hex(&self.tree.root(&hasher)),
+            root: fr_hex(&self.state.state_root(&hasher)),
             batch_num: self.confirmed_batch_num(),
             pending_txs: db::mempool_count_pending(&self.conn).unwrap_or(0),
+            pending_opens: db::opens_count_pending(&self.conn).unwrap_or(0),
             pending_deposits: db::deposits_count_pending(&self.conn).unwrap_or(0),
             contract_id: self.cfg.contract_id.clone(),
             inflight_batch: db::inflight_batch(&self.conn)
@@ -367,11 +431,13 @@ impl Engine {
             return Err(ApiError::BadSignature);
         }
 
-        // Nonce and balance against confirmed state + mempool shadow.
-        let sender_index = self.tree.find(&from_pk_x).ok_or(ApiError::AccountUnknown)?;
-        let sender = self.tree.get(sender_index).unwrap().clone();
+        // Nonce and balance against confirmed state + mempool/opens shadow
+        // (each queued open consumes one nonce for each party).
+        let sender_index = self.state.accounts.find(&from_pk_x).ok_or(ApiError::AccountUnknown)?;
+        let sender = self.state.accounts.get(sender_index).unwrap().clone();
         let pending = db::mempool_pending_for(&self.conn, &from_pk_x)?;
-        let expected_nonce = sender.nonce + pending.len() as u64;
+        let pending_open_count = db::opens_pending_for(&self.conn, &from_pk_x)?;
+        let expected_nonce = sender.nonce + pending.len() as u64 + pending_open_count;
         if tx.nonce != expected_nonce {
             return Err(ApiError::NonceMismatch { expected: expected_nonce });
         }
@@ -387,7 +453,7 @@ impl Engine {
 
         // Transfers: recipient must exist now or be created by a pending deposit.
         if !tx.is_withdraw
-            && self.tree.find(&to_field).is_none()
+            && self.state.accounts.find(&to_field).is_none()
             && !db::deposits_pending_pk(&self.conn, &to_field)?
         {
             return Err(ApiError::RecipientUnknown);
@@ -416,8 +482,8 @@ impl Engine {
             if db::insert_deposit(&self.conn, asset, seq, &pk_x, amount)? {
                 tracing::info!(asset, seq, amount, "observed L1 deposit");
                 // Jam alarms (known protocol limitation, see DESIGN.md).
-                if let Some(idx) = self.tree.find(&pk_x) {
-                    let account = self.tree.get(idx).unwrap();
+                if let Some(idx) = self.state.accounts.find(&pk_x) {
+                    let account = self.state.accounts.get(idx).unwrap();
                     let bal = match asset {
                         0 => account.cash,
                         _ => account.coll,
@@ -425,7 +491,7 @@ impl Engine {
                     if bal.checked_add(amount).is_none() {
                         tracing::error!(asset, seq, "DEPOSIT JAM: balance would exceed u64; FIFO is stuck");
                     }
-                } else if self.tree.free_index().is_none() {
+                } else if self.state.accounts.free_index().is_none() {
                     tracing::error!(asset, seq, "DEPOSIT JAM: tree full (256 accounts); FIFO is stuck");
                 }
             }
@@ -440,9 +506,203 @@ impl Engine {
         Ok(())
     }
 
+    // ---------- repo intents (M2) ----------
+
+    fn parse_wire_intent(&self, w: &WireIntent) -> Result<(Position, Fr, Fr, Signature, Fr), ApiError> {
+        let bad = |field: &str| ApiError::BadField(field.to_string());
+        let position = Position {
+            borrower_pk_x: parse_fr(&w.borrower_pk_x).map_err(|_| bad("borrower_pk_x"))?,
+            lender_pk_x: parse_fr(&w.lender_pk_x).map_err(|_| bad("lender_pk_x"))?,
+            cash: w.cash.parse().map_err(|_| bad("cash"))?,
+            coll: w.coll.parse().map_err(|_| bad("coll"))?,
+            rate_bps: w.rate_bps,
+            haircut_bps: w.haircut_bps,
+            open_ts: w.open_ts,
+            maturity_ts: w.maturity_ts,
+        };
+        if position.cash == 0 || position.coll == 0 {
+            return Err(bad("amounts"));
+        }
+        if position.maturity_ts <= position.open_ts {
+            return Err(bad("maturity_ts"));
+        }
+        if position.borrower_pk_x == position.lender_pk_x {
+            return Err(bad("counterparty"));
+        }
+        let borrower_pk_y = parse_fr(&w.borrower_pk_y).map_err(|_| bad("borrower_pk_y"))?;
+        let lender_pk_y = parse_fr(&w.lender_pk_y).map_err(|_| bad("lender_pk_y"))?;
+        let sig = Signature::from_limbs(
+            parse_fr(&w.sig.r_x).map_err(|_| bad("sig.r_x"))?,
+            parse_fr(&w.sig.r_y).map_err(|_| bad("sig.r_y"))?,
+            parse_fr(&w.sig.s_lo).map_err(|_| bad("sig.s_lo"))?,
+            parse_fr(&w.sig.s_hi).map_err(|_| bad("sig.s_hi"))?,
+        )
+        .ok_or(ApiError::BadSignature)?;
+        let hasher = Hasher::new();
+        let msg = open_message(&hasher, &position, w.borrower_nonce, w.lender_nonce);
+        Ok((position, borrower_pk_y, lender_pk_y, sig, msg))
+    }
+
+    /// Admit a half-signed open intent: the INITIATOR's signature must verify
+    /// over the open message; the counterparty countersigns via accept.
+    fn submit_intent(&mut self, w: WireIntent) -> Result<TxReceipt, ApiError> {
+        let hasher = Hasher::new();
+        let (position, borrower_pk_y, lender_pk_y, sig, msg) = self.parse_wire_intent(&w)?;
+        let (signer_x, signer_y) = match w.initiator.as_str() {
+            "borrower" => (position.borrower_pk_x, borrower_pk_y),
+            "lender" => (position.lender_pk_x, lender_pk_y),
+            _ => return Err(ApiError::BadField("initiator".into())),
+        };
+        let pk = pk_from_coords(&signer_x, &signer_y).ok_or(ApiError::BadSignature)?;
+        if !verify(&hasher, &pk, msg, &sig) {
+            return Err(ApiError::BadSignature);
+        }
+        // Both parties must exist on the rollup (an intent naming an unknown
+        // counterparty could never be applied).
+        if self.state.accounts.find(&position.borrower_pk_x).is_none()
+            || self.state.accounts.find(&position.lender_pk_x).is_none()
+        {
+            return Err(ApiError::AccountUnknown);
+        }
+        let (lo, hi) = sig.s_limbs();
+        let id = db::insert_intent(
+            &self.conn,
+            &db::IntentRow {
+                id: 0,
+                initiator: w.initiator.clone(),
+                borrower_pk_x: fr_hex(&position.borrower_pk_x),
+                borrower_pk_y: fr_hex(&borrower_pk_y),
+                lender_pk_x: fr_hex(&position.lender_pk_x),
+                lender_pk_y: fr_hex(&lender_pk_y),
+                cash: position.cash.to_string(),
+                coll: position.coll.to_string(),
+                rate_bps: position.rate_bps,
+                haircut_bps: position.haircut_bps,
+                open_ts: position.open_ts,
+                maturity_ts: position.maturity_ts,
+                borrower_nonce: w.borrower_nonce,
+                lender_nonce: w.lender_nonce,
+                sig: [fr_hex(&sig.r_x), fr_hex(&sig.r_y), fr_hex(&lo), fr_hex(&hi)],
+                status: "open".into(),
+                created_at: 0,
+            },
+        )?;
+        Ok(TxReceipt { id, status: "open".into() })
+    }
+
+    /// Countersign an intent: verify the acceptor's signature over the SAME
+    /// open message, then enqueue the fully signed open for batching.
+    fn accept_intent(&mut self, id: i64, accept: WireAccept) -> Result<TxReceipt, ApiError> {
+        let hasher = Hasher::new();
+        let bad = |field: &str| ApiError::BadField(field.to_string());
+        let intent = db::get_intent(&self.conn, id)?.ok_or(ApiError::NotFound)?;
+        if intent.status != "open" {
+            return Err(ApiError::NotFound);
+        }
+        let position = Position {
+            borrower_pk_x: parse_fr(&intent.borrower_pk_x).map_err(|_| bad("intent"))?,
+            lender_pk_x: parse_fr(&intent.lender_pk_x).map_err(|_| bad("intent"))?,
+            cash: intent.cash.parse().map_err(|_| bad("intent"))?,
+            coll: intent.coll.parse().map_err(|_| bad("intent"))?,
+            rate_bps: intent.rate_bps,
+            haircut_bps: intent.haircut_bps,
+            open_ts: intent.open_ts,
+            maturity_ts: intent.maturity_ts,
+        };
+        let borrower_pk_y = parse_fr(&intent.borrower_pk_y).map_err(|_| bad("intent"))?;
+        let lender_pk_y = parse_fr(&intent.lender_pk_y).map_err(|_| bad("intent"))?;
+        let msg = open_message(&hasher, &position, intent.borrower_nonce, intent.lender_nonce);
+
+        // The acceptor is whichever role did NOT initiate.
+        let (acceptor_x, acceptor_y) = match intent.initiator.as_str() {
+            "borrower" => (position.lender_pk_x, lender_pk_y),
+            _ => (position.borrower_pk_x, borrower_pk_y),
+        };
+        let acc_sig = Signature::from_limbs(
+            parse_fr(&accept.sig.r_x).map_err(|_| bad("sig.r_x"))?,
+            parse_fr(&accept.sig.r_y).map_err(|_| bad("sig.r_y"))?,
+            parse_fr(&accept.sig.s_lo).map_err(|_| bad("sig.s_lo"))?,
+            parse_fr(&accept.sig.s_hi).map_err(|_| bad("sig.s_hi"))?,
+        )
+        .ok_or(ApiError::BadSignature)?;
+        let pk = pk_from_coords(&acceptor_x, &acceptor_y).ok_or(ApiError::BadSignature)?;
+        if !verify(&hasher, &pk, msg, &acc_sig) {
+            return Err(ApiError::BadSignature);
+        }
+
+        // Reassemble both signatures in role order.
+        let init_sig = [
+            parse_fr(&intent.sig[0]).map_err(|_| bad("intent sig"))?,
+            parse_fr(&intent.sig[1]).map_err(|_| bad("intent sig"))?,
+            parse_fr(&intent.sig[2]).map_err(|_| bad("intent sig"))?,
+            parse_fr(&intent.sig[3]).map_err(|_| bad("intent sig"))?,
+        ];
+        let (acc_lo, acc_hi) = acc_sig.s_limbs();
+        let acc = [acc_sig.r_x, acc_sig.r_y, acc_lo, acc_hi];
+        let (b_sig, l_sig) = match intent.initiator.as_str() {
+            "borrower" => (init_sig, acc),
+            _ => (acc, init_sig),
+        };
+
+        let open_id = db::insert_open(
+            &self.conn,
+            Some(id),
+            &db::OpenRow {
+                id: 0,
+                borrower_pk_x: position.borrower_pk_x,
+                borrower_pk_y,
+                lender_pk_x: position.lender_pk_x,
+                lender_pk_y,
+                cash: position.cash,
+                coll: position.coll,
+                rate_bps: position.rate_bps,
+                haircut_bps: position.haircut_bps,
+                open_ts: position.open_ts,
+                maturity_ts: position.maturity_ts,
+                borrower_nonce: intent.borrower_nonce,
+                lender_nonce: intent.lender_nonce,
+                b_sig,
+                l_sig,
+                status: "pending".into(),
+            },
+        )?;
+        db::intent_set_status(&self.conn, id, "accepted")?;
+        Ok(TxReceipt { id: open_id, status: "pending".into() })
+    }
+
+    fn get_intents(&self, pk_hex: &str) -> Result<serde_json::Value, ApiError> {
+        let pk_x = parse_fr(pk_hex).map_err(|e| ApiError::BadField(format!("pk_x: {e:?}")))?;
+        let canonical = fr_hex(&pk_x);
+        let incoming = db::intents_for_counterparty(&self.conn, &canonical)?;
+        let outgoing = db::intents_by_initiator(&self.conn, &canonical)?;
+        Ok(serde_json::json!({ "incoming": incoming, "outgoing": outgoing }))
+    }
+
+    fn get_positions(&self, pk_hex: &str) -> Result<Vec<PositionInfo>, ApiError> {
+        let pk_x = parse_fr(pk_hex).map_err(|e| ApiError::BadField(format!("pk_x: {e:?}")))?;
+        Ok(self
+            .state
+            .positions
+            .slots
+            .iter()
+            .filter(|(_, p)| p.borrower_pk_x == pk_x || p.lender_pk_x == pk_x)
+            .map(|(slot, p)| PositionInfo {
+                slot: *slot,
+                borrower_pk_x: fr_hex(&p.borrower_pk_x),
+                lender_pk_x: fr_hex(&p.lender_pk_x),
+                cash: p.cash.to_string(),
+                coll: p.coll.to_string(),
+                rate_bps: p.rate_bps,
+                haircut_bps: p.haircut_bps,
+                open_ts: p.open_ts,
+                maturity_ts: p.maturity_ts,
+            })
+            .collect())
+    }
+
     // ---------- batch pipeline ----------
 
-    fn try_build_batch(&mut self) -> Result<Option<BatchJob>, ApiError> {
+    fn try_build_batch(&mut self, price: u64) -> Result<Option<BatchJob>, ApiError> {
         if !self.chain_synced {
             return Ok(None);
         }
@@ -452,36 +712,39 @@ impl Engine {
 
         let pending_txs = db::mempool_count_pending(&self.conn)?;
         let pending_deps = db::deposits_count_pending(&self.conn)?;
-        if pending_txs == 0 && pending_deps == 0 {
+        let pending_opens = db::opens_count_pending(&self.conn)?;
+        if pending_txs == 0 && pending_deps == 0 && pending_opens == 0 {
             return Ok(None);
         }
         let oldest_age = [
             db::mempool_oldest_pending_age(&self.conn)?,
             db::deposits_oldest_pending_age(&self.conn)?,
+            db::opens_oldest_pending_age(&self.conn)?,
         ]
         .into_iter()
         .flatten()
         .max()
         .unwrap_or(0);
 
-        // Batch eagerly: whenever more than one payment is pending, build on
+        // Batch eagerly: whenever more than one op is pending, build on
         // this tick (no waiting to fill the batch or hit the timer). The
         // deposit-queue-full and max-wait conditions remain as fallbacks so a
         // lone single payment, or deposit-only activity with no payments,
         // still settles instead of stranding.
-        let many_payments = pending_txs > 1;
+        let many_ops = pending_txs + pending_opens > 1;
         let deposits_full = pending_deps >= self.cfg.deposit_slots as u64;
         let waited = (oldest_age as u64) >= self.cfg.batch_max_wait_secs;
-        if !(many_payments || deposits_full || waited) {
+        if !(many_ops || deposits_full || waited) {
             return Ok(None);
         }
 
-        self.build_batch_now()
+        self.build_batch_now(price)
     }
 
-    fn build_batch_now(&mut self) -> Result<Option<BatchJob>, ApiError> {
+    fn build_batch_now(&mut self, price: u64) -> Result<Option<BatchJob>, ApiError> {
         let hasher = Hasher::new();
         let deposits = db::deposits_pending(&self.conn, self.cfg.deposit_slots)?;
+        let mut open_rows = db::opens_pending(&self.conn, self.cfg.open_slots)?;
         let mut candidates = db::mempool_pending(&self.conn, self.cfg.tx_slots * 4)?;
 
         // Cap withdrawals per batch (contract MAX_WITHDRAWALS = 8).
@@ -510,32 +773,43 @@ impl Engine {
             })
             .collect();
 
-        // Build on a clone; the live tree only advances at confirmation.
+        // Claimed batch timestamp: slightly behind wall-clock so it can never
+        // land ahead of the ledger (one-sided window, PLAN.md 6.1.3).
+        let batch_ts = (db::now() as u64).saturating_sub(5);
+
+        // Build on a clone; the live state only advances at confirmation.
         loop {
-            let mut work_tree = self.clone_tree();
+            let mut work_state = self.clone_state();
             let signed: Vec<SignedTx> = txs.iter().map(row_to_signed).collect();
-            match build_batch(
+            let opens: Vec<OpenRequest> = open_rows.iter().map(open_row_to_request).collect();
+            match build_repo_batch(
                 &hasher,
-                &mut work_tree,
+                &mut work_state,
                 self.cfg.deposit_slots,
+                self.cfg.open_slots,
                 self.cfg.tx_slots,
                 &dep_requests,
+                &opens,
                 &signed,
+                batch_ts,
+                price,
             ) {
                 Ok(witness) => {
                     let batch_num = self.confirmed_batch_num() + 1;
                     let count_cash = deposits.iter().filter(|d| d.asset == 0).count() as u32;
                     let count_coll = deposits.iter().filter(|d| d.asset == 1).count() as u32;
-                    let blob = blob_json(batch_num, &witness, &deposits, &txs);
+                    let blob = blob_json(batch_num, &witness, &deposits, &open_rows, &txs);
                     let envelope = envelope_json(&witness, count_cash, count_coll, &txs);
-                    let prover_toml = harness::prover::to_prover_toml(&witness);
+                    let prover_toml = harness::prover::to_repo_prover_toml(&witness);
                     db::insert_batch(
                         &self.conn,
                         batch_num,
-                        &witness.old_root,
-                        &witness.new_root,
+                        &witness.old_state_root,
+                        &witness.new_state_root,
                         count_cash,
                         count_coll,
+                        batch_ts,
+                        price,
                         &witness.da_commitment,
                         &blob,
                         &envelope,
@@ -546,6 +820,13 @@ impl Engine {
                         "batching",
                         Some(batch_num),
                     )?;
+                    db::opens_set_status(
+                        &self.conn,
+                        &open_rows.iter().map(|o| o.id).collect::<Vec<_>>(),
+                        "batching",
+                        Some(batch_num),
+                        None,
+                    )?;
                     db::mempool_set_status(
                         &self.conn,
                         &txs.iter().map(|t| t.id).collect::<Vec<_>>(),
@@ -553,10 +834,17 @@ impl Engine {
                         Some(batch_num),
                         None,
                     )?;
-                    tracing::info!(batch_num, txs = txs.len(), deposits = deposits.len(), "batch built");
+                    tracing::info!(
+                        batch_num,
+                        txs = txs.len(),
+                        opens = open_rows.len(),
+                        deposits = deposits.len(),
+                        "batch built"
+                    );
                     return Ok(Some(BatchJob { batch_num, prover_toml }));
                 }
-                Err(BuildError::TreeFull) | Err(BuildError::BalanceOverflow { .. })
+                Err(RepoBuildError::Payments(BuildError::TreeFull))
+                | Err(RepoBuildError::Payments(BuildError::BalanceOverflow { .. }))
                     if !deposits.is_empty() =>
                 {
                     // Deposit jam: cannot make progress at all (FIFO prefix is
@@ -564,7 +852,36 @@ impl Engine {
                     tracing::error!("deposit jam while building; batching stalled");
                     return Ok(None);
                 }
-                Err(err) => {
+                Err(RepoBuildError::Open(err)) => {
+                    // Evict the offending open and retry without it.
+                    use harness::repo::OpenError::*;
+                    let idx = match err {
+                        BorrowerNotFound { open_index }
+                        | LenderNotFound { open_index }
+                        | SameParty { open_index }
+                        | NonceMismatch { open_index, .. }
+                        | InsufficientCash { open_index, .. }
+                        | InsufficientColl { open_index, .. }
+                        | BadSignature { open_index, .. }
+                        | ZeroAmount { open_index }
+                        | BadTerms { open_index }
+                        | PositionsFull { open_index }
+                        | ReservedPaddingPk { open_index } => open_index,
+                    };
+                    let evicted = open_rows.remove(idx);
+                    tracing::warn!(id = evicted.id, ?err, "rejecting queued open");
+                    db::opens_set_status(
+                        &self.conn,
+                        &[evicted.id],
+                        "rejected",
+                        None,
+                        Some(&format!("{err:?}")),
+                    )?;
+                    if txs.is_empty() && deposits.is_empty() && open_rows.is_empty() {
+                        return Ok(None);
+                    }
+                }
+                Err(RepoBuildError::Payments(err)) => {
                     // Evict the offending tx and retry without it.
                     let idx = match err {
                         BuildError::SenderNotFound { tx_index }
@@ -586,7 +903,7 @@ impl Engine {
                         None,
                         Some(&format!("{err:?}")),
                     )?;
-                    if txs.is_empty() && deposits.is_empty() {
+                    if txs.is_empty() && deposits.is_empty() && open_rows.is_empty() {
                         return Ok(None);
                     }
                 }
@@ -601,18 +918,17 @@ impl Engine {
         public_inputs: Vec<u8>,
     ) -> Result<String, ApiError> {
         let batch = db::get_batch(&self.conn, batch_num)?.ok_or(ApiError::NotFound)?;
-        let mut expected = Vec::with_capacity(160);
-        for word in [&batch.old_root, &batch.new_root] {
-            expected.extend_from_slice(&word[..]);
-        }
-        // deposit_hash/withdraw_hash aren't stored as columns; reparse from envelope.
-        // Cheaper: trust bb's public_inputs only if the roots + da match and
-        // length is exactly 160 — the deposit/withdraw folds were computed by
-        // the same build we persisted.
-        if public_inputs.len() != 160
+        // Trust bb's public_inputs only if roots, da, batch_ts and price all
+        // match the persisted batch row and the blob is exactly 7 words —
+        // the fold hashes were computed by the same build we persisted.
+        let ts_word = fr_from_u64(batch.batch_ts);
+        let price_word = fr_from_u64(batch.price);
+        if public_inputs.len() != 224
             || public_inputs[..32] != batch.old_root
             || public_inputs[32..64] != batch.new_root
             || public_inputs[128..160] != batch.da_commitment
+            || public_inputs[160..192] != ts_word
+            || public_inputs[192..224] != price_word
         {
             return Err(ApiError::Internal("bb public_inputs mismatch".into()));
         }
@@ -647,29 +963,52 @@ impl Engine {
         let blob: serde_json::Value = serde_json::from_str(&batch.blob_json)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        // Replay on a clone: the live tree must not move unless the replay
-        // reproduces the exact root the proof landed (otherwise a corrupt
-        // blob/row would silently diverge the in-memory state).
-        let (deposits, txs) = parse_blob(&blob).map_err(ApiError::Internal)?;
-        let mut work_tree = self.clone_tree();
-        let witness = build_batch(
+        // Replay on a clone: the live state must not move unless the replay
+        // reproduces the exact state root the proof landed (otherwise a
+        // corrupt blob/row would silently diverge the in-memory state).
+        let (deposits, opens, txs) = parse_blob(&blob).map_err(ApiError::Internal)?;
+        let mut work_state = self.clone_state();
+        let witness = build_repo_batch(
             &hasher,
-            &mut work_tree,
+            &mut work_state,
             self.cfg.deposit_slots,
+            self.cfg.open_slots,
             self.cfg.tx_slots,
             &deposits,
+            &opens,
             &txs,
+            batch.batch_ts,
+            batch.price,
         )
         .map_err(|e| ApiError::Internal(format!("replay failed: {e:?}")))?;
-        if witness.new_root != batch.new_root {
+        if witness.new_state_root != batch.new_root {
             return Err(ApiError::Internal("replay root mismatch".into()));
         }
-        self.tree = work_tree;
+        let open_slots = witness.open_slots.clone();
+        self.state = work_state;
 
         // Persist everything atomically.
         let tx = self.conn.unchecked_transaction()?;
-        for (idx, account) in self.tree.leaves.iter() {
+        for (idx, account) in self.state.accounts.leaves.iter() {
             db::upsert_leaf(&tx, *idx, &account.pk_x, account.cash, account.coll, account.nonce)?;
+        }
+        for (slot, req) in open_slots.iter().zip(&opens) {
+            let p = &req.position;
+            db::upsert_position(
+                &tx,
+                &db::PositionRow {
+                    slot: *slot,
+                    borrower_pk_x: p.borrower_pk_x,
+                    lender_pk_x: p.lender_pk_x,
+                    cash: p.cash,
+                    coll: p.coll,
+                    rate_bps: p.rate_bps,
+                    haircut_bps: p.haircut_bps,
+                    open_ts: p.open_ts,
+                    maturity_ts: p.maturity_ts,
+                },
+                batch_num,
+            )?;
         }
         db::meta_set(&tx, "confirmed_batch_num", &batch_num.to_string())?;
 
@@ -683,6 +1022,18 @@ impl Engine {
         db::deposits_set_status(&tx, &dep_keys, "consumed", Some(batch_num))?;
         for d in &deposits {
             db::insert_history(&tx, &d.pk_x, batch_num, "deposit", None, d.asset as u32, d.amount, None)?;
+        }
+        let open_ids: Vec<i64> = blob["opens"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .filter_map(|o| o["open_id"].as_i64())
+            .collect();
+        db::opens_set_status(&tx, &open_ids, "included", Some(batch_num), None)?;
+        for (slot, req) in open_slots.iter().zip(&opens) {
+            let p = &req.position;
+            db::insert_history(&tx, &p.borrower_pk_x, batch_num, "repo_open", Some(&fr_hex(&p.lender_pk_x)), 0, p.cash, Some(*slot as u64))?;
+            db::insert_history(&tx, &p.lender_pk_x, batch_num, "repo_open", Some(&fr_hex(&p.borrower_pk_x)), 0, p.cash, Some(*slot as u64))?;
         }
         let tx_ids: Vec<i64> = blob["txs"]
             .as_array()
@@ -715,6 +1066,10 @@ impl Engine {
             [batch_num as i64],
         )?;
         tx.execute(
+            "UPDATE opens SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
+            [batch_num as i64],
+        )?;
+        tx.execute(
             "UPDATE deposits SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
             [batch_num as i64],
         )?;
@@ -726,8 +1081,11 @@ impl Engine {
         Ok(())
     }
 
-    fn clone_tree(&self) -> Tree {
-        Tree { leaves: self.tree.leaves.clone() }
+    fn clone_state(&self) -> L2State {
+        L2State {
+            accounts: Tree { leaves: self.state.accounts.leaves.clone() },
+            positions: PosTree { slots: self.state.positions.slots.clone() },
+        }
     }
 
 }
@@ -736,14 +1094,36 @@ impl Engine {
 /// round-trip tests drive — `parse_blob(blob_json(..)) == build inputs`).
 pub(crate) fn blob_json(
     batch_num: u64,
-    witness: &harness::batch::BatchWitness,
+    witness: &harness::repo::RepoBatchWitness,
     deposits: &[db::DepositRow],
+    opens: &[db::OpenRow],
     txs: &[db::MempoolRow],
 ) -> String {
         serde_json::json!({
+            "v": 2,
             "batch_num": batch_num,
-            "old_root": fr_hex(&witness.old_root),
-            "new_root": fr_hex(&witness.new_root),
+            "old_root": fr_hex(&witness.old_state_root),
+            "new_root": fr_hex(&witness.new_state_root),
+            "batch_ts": witness.batch_ts,
+            "price": witness.price.to_string(),
+            "opens": opens.iter().enumerate().map(|(i, o)| serde_json::json!({
+                "open_id": o.id,
+                "pos_index": witness.open_slots.get(i),
+                "borrower_pk_x": fr_hex(&o.borrower_pk_x),
+                "borrower_pk_y": fr_hex(&o.borrower_pk_y),
+                "lender_pk_x": fr_hex(&o.lender_pk_x),
+                "lender_pk_y": fr_hex(&o.lender_pk_y),
+                "cash": o.cash.to_string(),
+                "coll": o.coll.to_string(),
+                "rate_bps": o.rate_bps,
+                "haircut_bps": o.haircut_bps,
+                "open_ts": o.open_ts,
+                "maturity_ts": o.maturity_ts,
+                "borrower_nonce": o.borrower_nonce,
+                "lender_nonce": o.lender_nonce,
+                "b_sig": { "r_x": fr_hex(&o.b_sig[0]), "r_y": fr_hex(&o.b_sig[1]), "s_lo": fr_hex(&o.b_sig[2]), "s_hi": fr_hex(&o.b_sig[3]) },
+                "l_sig": { "r_x": fr_hex(&o.l_sig[0]), "r_y": fr_hex(&o.l_sig[1]), "s_lo": fr_hex(&o.l_sig[2]), "s_hi": fr_hex(&o.l_sig[3]) },
+            })).collect::<Vec<_>>(),
             "deposit_count_cash": deposits.iter().filter(|d| d.asset == 0).count(),
             "deposit_count_coll": deposits.iter().filter(|d| d.asset == 1).count(),
             "deposits": deposits.iter().map(|d| serde_json::json!({
@@ -789,14 +1169,15 @@ fn row_to_signed(row: &db::MempoolRow) -> SignedTx {
 /// CLI-arg-ready envelope; `proof` filled after proving. BytesN fields are
 /// bare hex (no 0x) per the stellar CLI's JSON arg convention.
 fn envelope_json(
-    witness: &harness::batch::BatchWitness,
+    witness: &harness::repo::RepoBatchWitness,
     deposit_count_cash: u32,
     deposit_count_coll: u32,
     txs: &[db::MempoolRow],
 ) -> String {
     let strip = |fr: &Fr| hex::encode(fr);
     serde_json::json!({
-        "new_root": strip(&witness.new_root),
+        "new_root": strip(&witness.new_state_root),
+        "batch_ts": witness.batch_ts,
         "deposit_count_cash": deposit_count_cash,
         "deposit_count_coll": deposit_count_coll,
         "withdrawals": txs.iter().filter(|t| t.is_withdraw).map(|t| serde_json::json!({
@@ -809,8 +1190,11 @@ fn envelope_json(
 }
 
 /// Reconstruct build inputs from a stored DA blob (also the documented
-/// external-verifier recipe: re-fold tx messages -> da_commitment).
-pub fn parse_blob(blob: &serde_json::Value) -> Result<(Vec<DepositRequest>, Vec<SignedTx>), String> {
+/// external-verifier recipe: re-fold open records + tx messages ->
+/// da_commitment).
+pub fn parse_blob(
+    blob: &serde_json::Value,
+) -> Result<(Vec<DepositRequest>, Vec<OpenRequest>, Vec<SignedTx>), String> {
     let mut deposits = Vec::new();
     for d in blob["deposits"].as_array().ok_or("bad blob: deposits")? {
         let asset = harness::tree::Asset::from_u32(
@@ -821,6 +1205,39 @@ pub fn parse_blob(blob: &serde_json::Value) -> Result<(Vec<DepositRequest>, Vec<
             pk_x: parse_fr(d["pk_x"].as_str().ok_or("bad pk_x")?).map_err(|e| format!("{e:?}"))?,
             asset,
             amount: d["amount"].as_str().ok_or("bad amount")?.parse().map_err(|_| "bad amount")?,
+        });
+    }
+    let mut opens = Vec::new();
+    for o in blob["opens"].as_array().unwrap_or(&Vec::new()) {
+        let fr = |key: &str| -> Result<Fr, String> {
+            parse_fr(o[key].as_str().ok_or_else(|| format!("bad {key}"))?)
+                .map_err(|e| format!("{key}: {e:?}"))
+        };
+        let sig = |name: &str| -> Result<Signature, String> {
+            let g = |k: &str| -> Result<Fr, String> {
+                parse_fr(o[name][k].as_str().ok_or_else(|| format!("bad {name}.{k}"))?)
+                    .map_err(|e| format!("{name}.{k}: {e:?}"))
+            };
+            Signature::from_limbs(g("r_x")?, g("r_y")?, g("s_lo")?, g("s_hi")?)
+                .ok_or_else(|| format!("bad {name} limbs"))
+        };
+        opens.push(OpenRequest {
+            position: Position {
+                borrower_pk_x: fr("borrower_pk_x")?,
+                lender_pk_x: fr("lender_pk_x")?,
+                cash: o["cash"].as_str().ok_or("bad cash")?.parse().map_err(|_| "bad cash")?,
+                coll: o["coll"].as_str().ok_or("bad coll")?.parse().map_err(|_| "bad coll")?,
+                rate_bps: o["rate_bps"].as_u64().ok_or("bad rate_bps")? as u32,
+                haircut_bps: o["haircut_bps"].as_u64().ok_or("bad haircut_bps")? as u32,
+                open_ts: o["open_ts"].as_u64().ok_or("bad open_ts")?,
+                maturity_ts: o["maturity_ts"].as_u64().ok_or("bad maturity_ts")?,
+            },
+            borrower_pk_y: fr("borrower_pk_y")?,
+            lender_pk_y: fr("lender_pk_y")?,
+            borrower_nonce: o["borrower_nonce"].as_u64().ok_or("bad borrower_nonce")?,
+            lender_nonce: o["lender_nonce"].as_u64().ok_or("bad lender_nonce")?,
+            borrower_sig: sig("b_sig")?,
+            lender_sig: sig("l_sig")?,
         });
     }
     let mut txs = Vec::new();
@@ -846,13 +1263,37 @@ pub fn parse_blob(blob: &serde_json::Value) -> Result<(Vec<DepositRequest>, Vec<
                 .ok_or("bad sig limbs")?,
         });
     }
-    Ok((deposits, txs))
+    Ok((deposits, opens, txs))
+}
+
+/// Reconstruct a signed OpenRequest from its DB row.
+pub(crate) fn open_row_to_request(row: &db::OpenRow) -> OpenRequest {
+    OpenRequest {
+        position: Position {
+            borrower_pk_x: row.borrower_pk_x,
+            lender_pk_x: row.lender_pk_x,
+            cash: row.cash,
+            coll: row.coll,
+            rate_bps: row.rate_bps,
+            haircut_bps: row.haircut_bps,
+            open_ts: row.open_ts,
+            maturity_ts: row.maturity_ts,
+        },
+        borrower_pk_y: row.borrower_pk_y,
+        lender_pk_y: row.lender_pk_y,
+        borrower_nonce: row.borrower_nonce,
+        lender_nonce: row.lender_nonce,
+        borrower_sig: Signature::from_limbs(row.b_sig[0], row.b_sig[1], row.b_sig[2], row.b_sig[3])
+            .expect("db sig corrupt"),
+        lender_sig: Signature::from_limbs(row.l_sig[0], row.l_sig[1], row.l_sig[2], row.l_sig[3])
+            .expect("db sig corrupt"),
+    }
 }
 
 /// Boot-time state loading + reconciliation against the chain.
 #[derive(Debug)]
 pub struct BootState {
-    pub tree: Tree,
+    pub state: L2State,
     pub chain_synced: bool,
 }
 
@@ -862,9 +1303,24 @@ pub fn load_and_reconcile(
     chain_batch_num: u64,
 ) -> Result<BootState, String> {
     let hasher = Hasher::new();
-    let mut tree = Tree::new();
+    let mut state = L2State::new();
     for (idx, pk_x, cash, coll, nonce) in db::load_leaves(conn).map_err(|e| e.to_string())? {
-        tree.set(idx, Account { pk_x, cash, coll, nonce });
+        state.accounts.set(idx, Account { pk_x, cash, coll, nonce });
+    }
+    for p in db::load_positions(conn).map_err(|e| e.to_string())? {
+        state.positions.set(
+            p.slot,
+            Position {
+                borrower_pk_x: p.borrower_pk_x,
+                lender_pk_x: p.lender_pk_x,
+                cash: p.cash,
+                coll: p.coll,
+                rate_bps: p.rate_bps,
+                haircut_bps: p.haircut_bps,
+                open_ts: p.open_ts,
+                maturity_ts: p.maturity_ts,
+            },
+        );
     }
     let db_batch_num = db::meta_get_u64(conn, "confirmed_batch_num").map_err(|e| e.to_string())?;
     let inflight = db::inflight_batch(conn).map_err(|e| e.to_string())?;
@@ -876,9 +1332,9 @@ pub fn load_and_reconcile(
         if let Some(batch) = &inflight {
             if batch.new_root == *chain_root {
                 tracing::warn!(batch.batch_num, "recovering: batch landed before crash");
-                // Confirmation happens via the engine after spawn (needs &mut tree);
+                // Confirmation happens via the engine after spawn (needs &mut state);
                 // signal by leaving status as-is; batcher resumes it.
-                return Ok(BootState { tree, chain_synced: true });
+                return Ok(BootState { state, chain_synced: true });
             }
         }
         return Err(format!(
@@ -892,10 +1348,10 @@ pub fn load_and_reconcile(
         ));
     }
 
-    let local_root = tree.root(&hasher);
+    let local_root = state.state_root(&hasher);
     if local_root != *chain_root {
         return Err(format!(
-            "tree root {} != chain root {} — refusing to batch",
+            "state root {} != chain root {} — refusing to batch",
             fr_hex(&local_root),
             fr_hex(chain_root)
         ));
@@ -915,6 +1371,11 @@ pub fn load_and_reconcile(
             )
             .map_err(|e| e.to_string())?;
             tx.execute(
+                "UPDATE opens SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
+                [batch.batch_num as i64],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
                 "UPDATE deposits SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
                 [batch.batch_num as i64],
             )
@@ -925,15 +1386,15 @@ pub fn load_and_reconcile(
         }
     }
 
-    Ok(BootState { tree, chain_synced: true })
+    Ok(BootState { state, chain_synced: true })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use harness::batch::{build_batch, tx_message, DepositRequest};
+    use harness::batch::{tx_message, DepositRequest};
     use harness::keys::{sign_with_nonce, Keypair};
-    use harness::poseidon::{fr_from_u64, FR_ZERO};
+    use harness::poseidon::FR_ZERO;
     use harness::tree::Asset;
 
     /// parse_blob(blob_json(..)) reproduces the exact build inputs, and
@@ -965,8 +1426,10 @@ mod tests {
                 asset: Asset::Coll, amount: 100_000, nonce: 0, is_withdraw: true, sig: sig2.clone(),
             },
         ];
-        let mut tree = Tree::new();
-        let witness = build_batch(&hasher, &mut tree, 2, 4, &deposits, &signed).unwrap();
+        let mut state = L2State::new();
+        let witness =
+            build_repo_batch(&hasher, &mut state, 2, 1, 4, &deposits, &[], &signed, 1_700_000_100, 250_000_000)
+                .unwrap();
 
         // Rows as the DB would hold them.
         let dep_rows: Vec<db::DepositRow> = deposits
@@ -999,13 +1462,14 @@ mod tests {
             })
             .collect();
 
-        let blob_str = blob_json(7, &witness, &dep_rows, &tx_rows);
+        let blob_str = blob_json(7, &witness, &dep_rows, &[], &tx_rows);
         let blob: serde_json::Value = serde_json::from_str(&blob_str).unwrap();
         assert_eq!(blob["batch_num"], 7);
         assert_eq!(blob["da_commitment"], fr_hex(&witness.da_commitment));
 
         // Round-trip to build inputs.
-        let (deps2, txs2) = parse_blob(&blob).unwrap();
+        let (deps2, opens2, txs2) = parse_blob(&blob).unwrap();
+        assert!(opens2.is_empty());
         assert_eq!(deps2.len(), deposits.len());
         for (a, b) in deposits.iter().zip(&deps2) {
             assert_eq!(a.pk_x, b.pk_x);
@@ -1025,9 +1489,11 @@ mod tests {
 
         // Rebuilding from the parsed blob reproduces the same witness
         // (deterministic replay — the confirm path's core assumption).
-        let mut tree2 = Tree::new();
-        let replay = build_batch(&hasher, &mut tree2, 2, 4, &deps2, &txs2).unwrap();
-        assert_eq!(replay.new_root, witness.new_root);
+        let mut state2 = L2State::new();
+        let replay =
+            build_repo_batch(&hasher, &mut state2, 2, 1, 4, &deps2, &opens2, &txs2, 1_700_000_100, 250_000_000)
+                .unwrap();
+        assert_eq!(replay.new_state_root, witness.new_state_root);
         assert_eq!(replay.da_commitment, witness.da_commitment);
 
         // External verifier recipe: fold the blob's tx messages.
@@ -1082,12 +1548,14 @@ mod engine_tests {
                 listen_addr: String::new(),
                 batch_max_wait_secs: max_wait,
                 tick_secs: 1,
-                circuit_pkg: "batch_n4".into(),
+                circuit_pkg: "batch_repo".into(),
                 deposit_slots,
+                open_slots: 2,
                 tx_slots,
+                oracle_id: String::new(),
             },
             conn,
-            tree: Tree::new(),
+            state: L2State::new(),
             chain_synced: true,
         }
     }
@@ -1095,7 +1563,7 @@ mod engine_tests {
     fn fund(e: &mut Engine, idx: u32, who: &Keypair, cash: u64) {
         // Every funded test account also gets some collateral so asset-1
         // admission paths are reachable.
-        e.tree.set(idx, Account { pk_x: who.pk_x(), cash, coll: 1_000, nonce: 0 });
+        e.state.accounts.set(idx, Account { pk_x: who.pk_x(), cash, coll: 1_000, nonce: 0 });
     }
 
     /// A correctly signed WireTx (transfer: `to` = recipient pk_x hex).
@@ -1226,39 +1694,39 @@ mod engine_tests {
         let mut e = engine(2, 4, 3600);
         fund(&mut e, 0, &alice, 1_000_000);
         fund(&mut e, 1, &bob, 500_000);
-        assert!(e.try_build_batch().unwrap().is_none());
+        assert!(e.try_build_batch(250_000_000).unwrap().is_none());
 
         // One pending payment, young, deposits not full -> wait.
         e.submit_tx(transfer(&alice, &bob, 1_000, 0)).unwrap();
-        assert!(e.try_build_batch().unwrap().is_none());
+        assert!(e.try_build_batch(250_000_000).unwrap().is_none());
 
         // >1 pending payments -> eager build.
         e.submit_tx(transfer(&bob, &alice, 2_000, 0)).unwrap();
-        let job = e.try_build_batch().unwrap().expect("eager build");
+        let job = e.try_build_batch(250_000_000).unwrap().expect("eager build");
         assert_eq!(job.batch_num, 1);
 
         // Inflight suppression: nothing builds while batch 1 is open.
         e.submit_tx(transfer(&alice, &bob, 10, 1)).unwrap();
         e.submit_tx(transfer(&bob, &alice, 20, 1)).unwrap();
-        assert!(e.try_build_batch().unwrap().is_none());
+        assert!(e.try_build_batch(250_000_000).unwrap().is_none());
 
         // Deposit queue full -> build (fresh engine, no payments).
         let mut e = engine(2, 4, 3600);
         e.observed_deposits(vec![(0, 0, alice.pk_x(), 5)]).unwrap();
-        assert!(e.try_build_batch().unwrap().is_none()); // 1 of 2 slots
+        assert!(e.try_build_batch(250_000_000).unwrap().is_none()); // 1 of 2 slots
         e.observed_deposits(vec![(0, 1, bob.pk_x(), 6)]).unwrap();
-        assert!(e.try_build_batch().unwrap().is_some());
+        assert!(e.try_build_batch(250_000_000).unwrap().is_some());
 
         // Max-wait fallback: a lone deposit with the timer at zero.
         let mut e = engine(2, 4, 0);
         e.observed_deposits(vec![(0, 0, alice.pk_x(), 5)]).unwrap();
-        assert!(e.try_build_batch().unwrap().is_some());
+        assert!(e.try_build_batch(250_000_000).unwrap().is_some());
 
         // Out-of-sync engine refuses to batch.
         let mut e = engine(2, 4, 0);
         e.chain_synced = false;
         e.observed_deposits(vec![(0, 0, alice.pk_x(), 5)]).unwrap();
-        assert!(e.try_build_batch().unwrap().is_none());
+        assert!(e.try_build_batch(250_000_000).unwrap().is_none());
     }
 
     #[test]
@@ -1286,7 +1754,7 @@ mod engine_tests {
         )
         .unwrap();
 
-        let job = e.try_build_batch().unwrap().expect("builds after eviction");
+        let job = e.try_build_batch(250_000_000).unwrap().expect("builds after eviction");
         assert_eq!(job.batch_num, 1);
 
         // Bad row rejected with a reason; good row riding in the batch.
@@ -1307,14 +1775,16 @@ mod engine_tests {
         assert_eq!(good_status, "batching");
     }
 
-    /// Build a valid 160-byte public-input blob for an inflight batch row.
+    /// Build a valid 224-byte public-input blob for an inflight batch row.
     fn pis_for(e: &Engine, batch_num: u64) -> Vec<u8> {
         let b = db::get_batch(&e.conn, batch_num).unwrap().unwrap();
-        let mut pis = Vec::with_capacity(160);
+        let mut pis = Vec::with_capacity(224);
         pis.extend_from_slice(&b.old_root);
         pis.extend_from_slice(&b.new_root);
         pis.extend_from_slice(&[0u8; 64]); // deposit/withdraw folds: not re-checked here
         pis.extend_from_slice(&b.da_commitment);
+        pis.extend_from_slice(&fr_from_u64(b.batch_ts));
+        pis.extend_from_slice(&fr_from_u64(b.price));
         pis
     }
 
@@ -1328,7 +1798,7 @@ mod engine_tests {
         e.observed_deposits(vec![(0, 0, carol.pk_x(), 700_000)]).unwrap();
         e.submit_tx(transfer(&alice, &bob, 100_000, 0)).unwrap();
 
-        let job = e.try_build_batch().unwrap().expect("build");
+        let job = e.try_build_batch(250_000_000).unwrap().expect("build");
         assert_eq!(db::inflight_batch(&e.conn).unwrap().unwrap().status, "proving");
 
         // Prove (synthetic), submit, land, confirm.
@@ -1342,13 +1812,13 @@ mod engine_tests {
         // State advanced everywhere.
         assert_eq!(e.confirmed_batch_num(), 1);
         let hasher = Hasher::new();
-        assert_eq!(e.tree.get(0).unwrap().cash, 900_000);
-        assert_eq!(e.tree.get(0).unwrap().nonce, 1);
-        assert_eq!(e.tree.get(1).unwrap().cash, 600_000);
-        let carol_idx = e.tree.find(&carol.pk_x()).expect("carol created by deposit");
-        assert_eq!(e.tree.get(carol_idx).unwrap().cash, 700_000);
+        assert_eq!(e.state.accounts.get(0).unwrap().cash, 900_000);
+        assert_eq!(e.state.accounts.get(0).unwrap().nonce, 1);
+        assert_eq!(e.state.accounts.get(1).unwrap().cash, 600_000);
+        let carol_idx = e.state.accounts.find(&carol.pk_x()).expect("carol created by deposit");
+        assert_eq!(e.state.accounts.get(carol_idx).unwrap().cash, 700_000);
         // Persisted leaves match the live tree root.
-        let boot = load_and_reconcile(&e.conn, &e.tree.root(&hasher), 1).unwrap();
+        let boot = load_and_reconcile(&e.conn, &e.state.state_root(&hasher), 1).unwrap();
         assert!(boot.chain_synced);
         // Terminal statuses + history.
         assert!(db::inflight_batch(&e.conn).unwrap().is_none());
@@ -1366,11 +1836,11 @@ mod engine_tests {
         fund(&mut e, 0, &alice, 1_000_000);
         fund(&mut e, 1, &bob, 500_000);
         e.submit_tx(transfer(&alice, &bob, 1_000, 0)).unwrap();
-        let job = e.try_build_batch().unwrap().unwrap();
+        let job = e.try_build_batch(250_000_000).unwrap().unwrap();
 
         let good_pis = pis_for(&e, job.batch_num);
-        // Wrong PI length.
-        assert!(e.record_proof(job.batch_num, vec![1u8; 14_592], vec![0u8; 159]).is_err());
+        // Wrong PI length (the old 5-PI size must be rejected too).
+        assert!(e.record_proof(job.batch_num, vec![1u8; 14_592], vec![0u8; 160]).is_err());
         // Tampered da_commitment word.
         let mut bad = good_pis.clone();
         bad[159] ^= 1;
@@ -1390,7 +1860,7 @@ mod engine_tests {
         fund(&mut e, 0, &alice, 1_000_000);
         fund(&mut e, 1, &bob, 500_000);
         e.submit_tx(transfer(&alice, &bob, 1_000, 0)).unwrap();
-        let job = e.try_build_batch().unwrap().unwrap();
+        let job = e.try_build_batch(250_000_000).unwrap().unwrap();
         e.record_proof(job.batch_num, vec![1u8; 14_592], pis_for(&e, 1)).unwrap();
 
         // Corrupt the recorded new_root.
@@ -1402,9 +1872,9 @@ mod engine_tests {
             .unwrap();
 
         let hasher = Hasher::new();
-        let root_before = e.tree.root(&hasher);
+        let root_before = e.state.state_root(&hasher);
         assert!(e.confirm_batch(1).is_err());
-        assert_eq!(e.tree.root(&hasher), root_before, "live tree must not move");
+        assert_eq!(e.state.state_root(&hasher), root_before, "live state must not move");
         assert_eq!(e.confirmed_batch_num(), 0);
     }
 
@@ -1417,7 +1887,7 @@ mod engine_tests {
         fund(&mut e, 0, &alice, 1_000_000);
         fund(&mut e, 1, &bob, 500_000);
         e.submit_tx(transfer(&alice, &bob, 1_000, 0)).unwrap();
-        let job = e.try_build_batch().unwrap().unwrap();
+        let job = e.try_build_batch(250_000_000).unwrap().unwrap();
         assert_eq!(job.batch_num, 1);
 
         e.fail_batch(1, "submit_batch returned error").unwrap();
@@ -1425,14 +1895,14 @@ mod engine_tests {
         assert_eq!(db::mempool_count_pending(&e.conn).unwrap(), 1, "inputs requeued");
 
         // The rebuild reuses batch_num 1 and must succeed.
-        let rebuilt = e.try_build_batch().unwrap().expect("rebuild after failure");
+        let rebuilt = e.try_build_batch(250_000_000).unwrap().expect("rebuild after failure");
         assert_eq!(rebuilt.batch_num, 1);
     }
 
     #[test]
     fn boot_recovery_matrix() {
         let hasher = Hasher::new();
-        let genesis = Tree::new().root(&hasher);
+        let genesis = L2State::new().state_root(&hasher);
         let (alice, bob) = (kp(101), kp(202));
 
         // (a) Fresh DB, chain at genesis -> synced.
@@ -1444,11 +1914,11 @@ mod engine_tests {
         fund(&mut e, 0, &alice, 1_000_000);
         fund(&mut e, 1, &bob, 500_000);
         for (i, a) in [(0u32, &alice), (1u32, &bob)] {
-            let acct = e.tree.get(i).unwrap();
+            let acct = e.state.accounts.get(i).unwrap();
             db::upsert_leaf(&e.conn, i, &a.pk_x(), acct.cash, acct.coll, acct.nonce).unwrap();
         }
         e.submit_tx(transfer(&alice, &bob, 1_000, 0)).unwrap();
-        e.try_build_batch().unwrap().unwrap();
+        e.try_build_batch(250_000_000).unwrap().unwrap();
         let landed_root = db::get_batch(&e.conn, 1).unwrap().unwrap().new_root;
         let boot = load_and_reconcile(&e.conn, &landed_root, 1).unwrap();
         assert!(boot.chain_synced, "finish-confirm path");
@@ -1477,12 +1947,12 @@ mod engine_tests {
         fund(&mut e, 0, &alice, 1_000_000);
         fund(&mut e, 1, &bob, 500_000);
         for (i, a) in [(0u32, &alice), (1u32, &bob)] {
-            let acct = e.tree.get(i).unwrap();
+            let acct = e.state.accounts.get(i).unwrap();
             db::upsert_leaf(&e.conn, i, &a.pk_x(), acct.cash, acct.coll, acct.nonce).unwrap();
         }
-        let chain_root = e.tree.root(&hasher);
+        let chain_root = e.state.state_root(&hasher);
         e.submit_tx(transfer(&alice, &bob, 1_000, 0)).unwrap();
-        e.try_build_batch().unwrap().unwrap(); // status 'proving', then "crash"
+        e.try_build_batch(250_000_000).unwrap().unwrap(); // status 'proving', then "crash"
         let boot = load_and_reconcile(&e.conn, &chain_root, 0).unwrap();
         assert!(boot.chain_synced);
         assert!(db::inflight_batch(&e.conn).unwrap().is_none(), "interrupted prove cleared");

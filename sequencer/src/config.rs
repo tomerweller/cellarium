@@ -19,10 +19,13 @@ pub struct Config {
     pub batch_max_wait_secs: u64,
     /// Watcher/batcher poll interval.
     pub tick_secs: u64,
-    /// Circuit package to prove (fixed shape D=4/N=16 for batch_n16).
+    /// Circuit package to prove (fixed shape D=4/O=2/T=4 for batch_repo).
     pub circuit_pkg: String,
     pub deposit_slots: usize,
+    pub open_slots: usize,
     pub tx_slots: usize,
+    /// Mock price oracle contract (read every build; PLAN.md 1.5/1.6).
+    pub oracle_id: String,
 }
 
 fn var(name: &str) -> Result<String, String> {
@@ -35,11 +38,9 @@ fn var_or(name: &str, default: &str) -> String {
 
 impl Config {
     pub fn from_env() -> Result<Config, String> {
-        let circuit_pkg = var_or("CIRCUIT_PKG", "batch_n16");
-        let (deposit_slots, tx_slots) = match circuit_pkg.as_str() {
-            "batch_n4" => (2, 4),
-            "batch_n16" => (4, 16),
-            "batch_n64" => (8, 64),
+        let circuit_pkg = var_or("CIRCUIT_PKG", "batch_repo");
+        let (deposit_slots, open_slots, tx_slots) = match circuit_pkg.as_str() {
+            "batch_repo" => (4, 2, 4),
             other => return Err(format!("unknown CIRCUIT_PKG {other}")),
         };
         Ok(Config {
@@ -56,7 +57,9 @@ impl Config {
             tick_secs: var_or("TICK_SECS", "5").parse().map_err(|_| "bad TICK_SECS")?,
             circuit_pkg,
             deposit_slots,
+            open_slots,
             tx_slots,
+            oracle_id: var("ORACLE_ID")?,
         })
     }
 }
