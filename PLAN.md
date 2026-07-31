@@ -349,12 +349,13 @@ These amend the sections above and take precedence where they conflict.
 - **Deposit fold with two queues:** single `deposit_hash` accumulator; fold
   the XLM-queue prefix first, then the tUST-queue prefix; envelope carries
   `(deposit_count_xlm, deposit_count_tust)`. Order documented in DESIGN.md.
-- **tUST implementation:** a classic Stellar asset (issuer key we control)
-  wrapped via its SAC — gives SEP-41 + admin `mint` for free, and classic
-  assets are capped at i64::MAX base units, which satisfies the ≤ u64::MAX
-  supply invariant of 1.1 automatically. `just bootstrap` deploys/wraps it and
-  a `scripts/` helper mints; a dev-only faucet path (sequencer endpoint or
-  wallet dev button) funds browser users with tUST for the M5 demo.
+- **tUST implementation** *(revised during M0)*: a pure Soroban SEP-41 token
+  contract (`contracts/tust/`), 7 decimals, admin-mintable, supply cap
+  ≤ u64::MAX enforced in the token. The classic-asset/SAC route was tried
+  first but requires a change-trust step on every receiving G account, which
+  frictions the e2e and the browser demo; a native Soroban token needs no
+  trustlines. `just bootstrap` deploys it; `scripts/mint_tust.sh` mints; a
+  dev-only faucet path funds browser users with tUST for the M5 demo.
 - **Close-interest determinism note:** the borrower signs close without
   knowing the exact inclusion `batch_ts`, so the repaid interest floats with
   inclusion time — but close is only valid through `maturity_ts`, so the

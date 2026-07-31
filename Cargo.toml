@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["contracts/rollup", "harness", "sequencer"]
+members = ["contracts/rollup", "contracts/oracle", "contracts/tust", "harness", "sequencer"]
 
 [workspace.package]
 edition = "2021"

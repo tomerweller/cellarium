@@ -2,7 +2,10 @@
 # Bootstrap a fresh Soribium deployment on Stellar testnet:
 #   - generate + friendbot-fund the sequencer account
 #   - build the rollup wasm and export the batch_n16 verification key
-#   - deploy the native-asset SAC (the pinned SEP-41 token) + the rollup
+#   - deploy the native-asset SAC (the cash leg) + the rollup
+#   - deploy the mock tUST collateral token (pure Soroban SEP-41, admin-
+#     mintable, supply cap <= u64::MAX enforced in-contract) and the mock
+#     price oracle (PLAN.md M0)
 #   - write .env consumed by docker-compose
 #
 # Idempotent-ish: reuses the sequencer identity if it exists; always deploys a
@@ -37,10 +40,38 @@ VK_LEN=$(wc -c < "$VK_BIN" | tr -d ' ')
 [ "$VK_LEN" = "1760" ] || { echo "unexpected VK length $VK_LEN"; exit 1; }
 VK=$(xxd -p "$VK_BIN" | tr -d '\n')
 
-echo "==> deploying native SAC token"
+echo "==> deploying native SAC token (cash leg)"
 stellar contract asset deploy --asset native --source "$IDENTITY" --network "$NET" 2>/dev/null || true
 TOKEN=$(stellar contract id asset --asset native --network "$NET")
 echo "    $TOKEN"
+
+echo "==> tUST admin identity + token contract (collateral leg)"
+# Pure Soroban SEP-41 token (contracts/tust): no classic trustlines, so any
+# G/C address can receive it — the e2e and the browser demo need no
+# change-trust step. Supply cap <= u64::MAX enforced in the token itself.
+TUST_ADMIN_IDENTITY=soribium-tust-admin
+stellar keys generate "$TUST_ADMIN_IDENTITY" --network "$NET" --fund 2>/dev/null \
+  || stellar keys fund "$TUST_ADMIN_IDENTITY" --network "$NET" 2>/dev/null || true
+TUST_ADMIN=$(stellar keys address "$TUST_ADMIN_IDENTITY")
+TUST=$(stellar contract deploy --wasm target/wasm32v1-none/release/tust.wasm \
+  --source "$TUST_ADMIN_IDENTITY" --network "$NET" -- --admin "$TUST_ADMIN")
+echo "    $TUST (admin $TUST_ADMIN)"
+
+echo "==> oracle admin identity + oracle contract"
+ORACLE_ADMIN_IDENTITY=soribium-oracle-admin
+stellar keys generate "$ORACLE_ADMIN_IDENTITY" --network "$NET" --fund 2>/dev/null \
+  || stellar keys fund "$ORACLE_ADMIN_IDENTITY" --network "$NET" 2>/dev/null || true
+ORACLE_ADMIN=$(stellar keys address "$ORACLE_ADMIN_IDENTITY")
+ORACLE_ADMIN_SECRET=$(stellar keys show "$ORACLE_ADMIN_IDENTITY")
+ORACLE=$(stellar contract deploy --wasm target/wasm32v1-none/release/oracle.wasm \
+  --source "$ORACLE_ADMIN_IDENTITY" --network "$NET" -- --admin "$ORACLE_ADMIN")
+echo "    $ORACLE (admin $ORACLE_ADMIN)"
+
+# Initial price: 1 tUST = 25 XLM (XLM-per-tUST x 1e7, PLAN.md refinement 6.1.1).
+INITIAL_PRICE="${INITIAL_PRICE:-250000000}"
+stellar contract invoke --id "$ORACLE" --source "$ORACLE_ADMIN_IDENTITY" --network "$NET" -- \
+  set_price --price "$INITIAL_PRICE" >/dev/null
+echo "    initial price set: $INITIAL_PRICE"
 
 echo "==> genesis root (empty depth-8 tree)"
 GENESIS=$(cargo run -q -p sequencer -- genesis-root)
@@ -58,6 +89,11 @@ RPC_URL=https://soroban-testnet.stellar.org
 NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 CONTRACT_ID=$ROLLUP
 TOKEN_ID=$TOKEN
+TUST_ID=$TUST
+TUST_ADMIN=$TUST_ADMIN
+ORACLE_ID=$ORACLE
+ORACLE_ADMIN=$ORACLE_ADMIN
+ORACLE_ADMIN_SECRET=$ORACLE_ADMIN_SECRET
 SEQUENCER_SECRET=$SEQ_SECRET
 SEQUENCER_ADDRESS=$SEQ_ADDR
 BATCH_MAX_WAIT_SECS=30
