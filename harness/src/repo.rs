@@ -583,3 +583,184 @@ pub fn build_repo_batch(
         open_slots,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::keys::{sign_with_nonce, Keypair};
+    use crate::settle::{close_message, CloseRequest, LiqRequest};
+    use crate::tree::Asset;
+    use ark_grumpkin::Fr as Scalar;
+
+    fn kp(sk: u64) -> Keypair {
+        Keypair::from_sk(Scalar::from(sk))
+    }
+
+    const SLOTS: (usize, usize, usize, usize, usize) = (4, 2, 2, 2, 4);
+    const PRICE: u64 = 250_000_000;
+    const T0: u64 = 1_700_000_000;
+
+    /// Sum of (cash, coll) across accounts AND open positions — the PLAN §3
+    /// conservation quantity (deposits/withdrawals are zero in these
+    /// batches, so it must be constant across every repo op).
+    fn totals(state: &L2State) -> (u128, u128) {
+        let mut cash: u128 = state.accounts.leaves.values().map(|a| a.cash as u128).sum();
+        let mut coll: u128 = state.accounts.leaves.values().map(|a| a.coll as u128).sum();
+        for p in state.positions.slots.values() {
+            // The position holds the collateral; the cash claim is not an
+            // asset (the borrower already has the cash).
+            coll += p.coll as u128;
+            let _ = &mut cash;
+        }
+        (cash, coll)
+    }
+
+    fn signed_open(
+        hasher: &Hasher,
+        p: &Position,
+        borrower: &Keypair,
+        lender: &Keypair,
+        b_nonce: u64,
+        l_nonce: u64,
+        k: u64,
+    ) -> OpenRequest {
+        let msg = open_message(hasher, p, b_nonce, l_nonce);
+        OpenRequest {
+            position: p.clone(),
+            borrower_pk_y: borrower.pk_y(),
+            lender_pk_y: lender.pk_y(),
+            borrower_nonce: b_nonce,
+            lender_nonce: l_nonce,
+            borrower_sig: sign_with_nonce(hasher, borrower, msg, Scalar::from(k)),
+            lender_sig: sign_with_nonce(hasher, lender, msg, Scalar::from(k + 1)),
+        }
+    }
+
+    /// Full lifecycle across four batches — open, close, re-open, default,
+    /// re-open, liquidate — asserting per-asset value conservation and slot
+    /// reuse at every step (PLAN §3).
+    #[test]
+    fn repo_lifecycle_conserves_value_and_reuses_slots() {
+        let hasher = Hasher::new();
+        let (lender, borrower) = (kp(101), kp(202));
+        let mut state = L2State::new();
+        state.accounts.set(0, Account { pk_x: lender.pk_x(), cash: 50_000_000, coll: 0, nonce: 0 });
+        state.accounts.set(1, Account { pk_x: borrower.pk_x(), cash: 10_000_000, coll: 20_000_000, nonce: 0 });
+        let before = totals(&state);
+
+        let terms = Position {
+            borrower_pk_x: borrower.pk_x(),
+            lender_pk_x: lender.pk_x(),
+            cash: 5_000_000,
+            coll: 10_000_000,
+            rate_bps: 430,
+            haircut_bps: 200,
+            open_ts: T0,
+            maturity_ts: T0 + 86_400,
+        };
+
+        // Batch 1: open.
+        let open = signed_open(&hasher, &terms, &borrower, &lender, 0, 0, 11);
+        let w1 = build_repo_batch(&hasher, &mut state, SLOTS, &[], &[], &[], &[open], &[], T0 + 10, PRICE)
+            .unwrap();
+        assert_eq!(w1.open_slots, vec![0]);
+        assert_eq!(totals(&state), before, "open must conserve both assets");
+
+        // Batch 2: borrower closes 6h in; interest moves cash borrower->lender.
+        let close_msg = close_message(&hasher, 0, &terms, 1);
+        let close = CloseRequest {
+            pos_index: 0,
+            borrower_pk_y: borrower.pk_y(),
+            borrower_nonce: 1,
+            sig: sign_with_nonce(&hasher, &borrower, close_msg, Scalar::from(21u64)),
+        };
+        build_repo_batch(&hasher, &mut state, SLOTS, &[], &[close], &[], &[], &[], T0 + 21_600, PRICE)
+            .unwrap();
+        assert_eq!(totals(&state), before, "close must conserve both assets");
+        assert!(state.positions.slots.is_empty());
+        let intr = crate::settle::interest(5_000_000, 430, 21_590);
+        assert_eq!(state.accounts.get(0).unwrap().cash, 50_000_000 + intr);
+
+        // Batch 3: re-open into the FREED slot, then let it default.
+        let mut terms2 = terms.clone();
+        terms2.open_ts = T0 + 22_000;
+        terms2.maturity_ts = T0 + 22_100;
+        let open2 = signed_open(&hasher, &terms2, &borrower, &lender, 2, 1, 31);
+        let w3 = build_repo_batch(&hasher, &mut state, SLOTS, &[], &[], &[], &[open2], &[], T0 + 22_050, PRICE)
+            .unwrap();
+        assert_eq!(w3.open_slots, vec![0], "freed slot must be reused (find-first)");
+        build_repo_batch(
+            &hasher, &mut state, SLOTS,
+            &[], &[], &[LiqRequest { pos_index: 0, is_liquidation: false }], &[], &[],
+            T0 + 23_000, PRICE,
+        )
+        .unwrap();
+        assert_eq!(totals(&state), before, "default must conserve both assets");
+        // Lender took the collateral.
+        assert_eq!(state.accounts.get(0).unwrap().coll, 10_000_000);
+
+        // Batch 4: open once more and liquidate on a price crash.
+        let mut terms3 = terms.clone();
+        terms3.open_ts = T0 + 24_000;
+        terms3.maturity_ts = T0 + 100_000;
+        let open3 = signed_open(&hasher, &terms3, &borrower, &lender, 3, 2, 41);
+        build_repo_batch(&hasher, &mut state, SLOTS, &[], &[], &[], &[open3], &[], T0 + 24_010, PRICE)
+            .unwrap();
+        let crash = 3_000_000; // well past the half-haircut breach
+        build_repo_batch(
+            &hasher, &mut state, SLOTS,
+            &[], &[], &[LiqRequest { pos_index: 0, is_liquidation: true }], &[], &[],
+            T0 + 24_100, crash,
+        )
+        .unwrap();
+        assert_eq!(totals(&state), before, "liquidation must conserve both assets");
+        assert_eq!(state.accounts.get(0).unwrap().coll, 20_000_000);
+        assert!(state.positions.slots.is_empty());
+    }
+
+    /// Watcher-shaped negatives: the builder must refuse a default before
+    /// maturity and a liquidation at a healthy price.
+    #[test]
+    fn settle_preconditions_enforced_at_build() {
+        let hasher = Hasher::new();
+        let (lender, borrower) = (kp(101), kp(202));
+        let mut state = L2State::new();
+        state.accounts.set(0, Account { pk_x: lender.pk_x(), cash: 50_000_000, coll: 0, nonce: 0 });
+        state.accounts.set(1, Account { pk_x: borrower.pk_x(), cash: 0, coll: 20_000_000, nonce: 0 });
+        let terms = Position {
+            borrower_pk_x: borrower.pk_x(),
+            lender_pk_x: lender.pk_x(),
+            cash: 5_000_000,
+            coll: 10_000_000,
+            rate_bps: 430,
+            haircut_bps: 200,
+            open_ts: T0,
+            maturity_ts: T0 + 86_400,
+        };
+        let open = signed_open(&hasher, &terms, &borrower, &lender, 0, 0, 51);
+        build_repo_batch(&hasher, &mut state, SLOTS, &[], &[], &[], &[open], &[], T0 + 10, PRICE)
+            .unwrap();
+
+        // Default before maturity: refused.
+        let clone = |s: &L2State| L2State {
+            accounts: Tree { leaves: s.accounts.leaves.clone() },
+            positions: PosTree { slots: s.positions.slots.clone() },
+        };
+        let err = build_repo_batch(
+            &hasher, &mut clone(&state), SLOTS,
+            &[], &[], &[LiqRequest { pos_index: 0, is_liquidation: false }], &[], &[],
+            T0 + 100, PRICE,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RepoBuildError::Liq(crate::settle::SettleError::NotPastMaturity { .. })));
+
+        // Liquidation at a healthy price: refused.
+        let err = build_repo_batch(
+            &hasher, &mut clone(&state), SLOTS,
+            &[], &[], &[LiqRequest { pos_index: 0, is_liquidation: true }], &[], &[],
+            T0 + 100, PRICE,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RepoBuildError::Liq(crate::settle::SettleError::MarginHealthy { .. })));
+    }
+}

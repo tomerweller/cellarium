@@ -821,6 +821,7 @@ pub fn intent_set_status(conn: &Connection, id: i64, status: &str) -> DbResult<(
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // status mirrors a DB column; not all consumers read it
 pub struct OpenRow {
     pub id: i64,
     pub borrower_pk_x: Fr,

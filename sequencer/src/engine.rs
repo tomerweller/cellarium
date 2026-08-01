@@ -16,8 +16,7 @@ use harness::keys::{pk_from_coords, verify, Signature};
 use harness::l1::address_to_field;
 use harness::poseidon::{fr_from_u64, Fr, Hasher, FR_ZERO};
 use harness::repo::{
-    build_repo_batch, open_message, open_record, L2State, OpenRequest, PosTree, Position,
-    RepoBuildError,
+    build_repo_batch, open_message, L2State, OpenRequest, PosTree, Position, RepoBuildError,
 };
 use harness::settle::{close_message, CloseRequest, LiqRequest, SettleError};
 use harness::tree::{Account, Tree};
@@ -1216,7 +1215,11 @@ impl Engine {
         for (lreq, lentry) in liqs.iter().zip(witness.liqs.iter()) {
             let p = &lentry.position;
             db::delete_position(&tx, lreq.pos_index)?;
-            db::liqs_set_status(&tx, &[lreq.pos_index], "included", Some(batch_num), None)?;
+            // DELETE (not mark-included): liq rows are keyed by slot, and a
+            // freed slot is reusable by a later open — a lingering settled
+            // row would block the watcher from ever enqueueing that slot
+            // again (bug found by the M4 e2e).
+            db::delete_liq(&tx, lreq.pos_index)?;
             let kind = if lreq.is_liquidation { "repo_liquidation" } else { "repo_default" };
             db::insert_history(&tx, &p.borrower_pk_x, batch_num, kind, Some(&fr_hex(&p.lender_pk_x)), 1, p.coll, Some(lreq.pos_index as u64))?;
             db::insert_history(&tx, &p.lender_pk_x, batch_num, kind, Some(&fr_hex(&p.borrower_pk_x)), 1, p.coll, Some(lreq.pos_index as u64))?;
