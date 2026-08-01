@@ -71,22 +71,38 @@ async fn run() -> Result<(), String> {
 
     let engine = engine::spawn(cfg.clone(), conn, boot.state, boot.chain_synced);
 
-    // Background tasks: deposit watcher + batch pipeline.
-    tokio::spawn(watcher::run(engine.clone(), client.clone(), cfg.tick_secs, dep_cursors));
-    tokio::spawn(batcher::run(engine.clone(), client.clone(), cfg.clone()));
+    // Background tasks: deposit watcher + batch pipeline. Their handles are
+    // supervised below — silent task death must not leave a healthy-looking
+    // HTTP server running (issue #10).
+    let health = Arc::new(api::Health::default());
+    let watcher_task = tokio::spawn(watcher::run(
+        engine.clone(),
+        client.clone(),
+        cfg.tick_secs,
+        dep_cursors,
+        health.clone(),
+    ));
+    let batcher_task =
+        tokio::spawn(batcher::run(engine.clone(), client.clone(), cfg.clone(), health.clone()));
 
     // HTTP server.
-    let state = api::AppState { engine, cfg: cfg.clone() };
+    let state = api::AppState { engine, cfg: cfg.clone(), health };
     let app = api::router(state);
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr)
         .await
         .map_err(|e| format!("bind {}: {e}", cfg.listen_addr))?;
     tracing::info!(addr = %cfg.listen_addr, "listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e| format!("serve: {e}"))?;
-    Ok(())
+    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+
+    // Supervise: the watcher and batcher loop forever, so their future
+    // resolving means the task panicked or was aborted. Exit non-zero and
+    // let the platform restart the whole process — restarting only the task
+    // would hide whatever corrupted it.
+    tokio::select! {
+        res = server => res.map_err(|e| format!("serve: {e}")),
+        res = watcher_task => Err(format!("watcher task exited unexpectedly: {res:?}")),
+        res = batcher_task => Err(format!("batcher task exited unexpectedly: {res:?}")),
+    }
 }
 
 async fn shutdown_signal() {

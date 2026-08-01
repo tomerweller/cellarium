@@ -4,6 +4,7 @@
 //! construction; the engine dedupes via INSERT OR IGNORE, so a restart with a
 //! stale cursor is harmless.
 
+use crate::api::Health;
 use crate::engine::Command;
 use crate::stellar::StellarClient;
 use harness::poseidon::Fr;
@@ -16,10 +17,12 @@ pub async fn run(
     client: Arc<dyn StellarClient>,
     tick_secs: u64,
     mut cursors: [u64; 2],
+    health: Arc<Health>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(tick_secs));
     loop {
         interval.tick().await;
+        let mut tick_ok = true;
 
         // Refund detection (issue #1 M5): the contract's refund_deposit
         // advances the queue head without a batch. Report the heads so the
@@ -55,10 +58,12 @@ pub async fn run(
                 Ok(Ok(t)) => t,
                 Ok(Err(e)) => {
                     tracing::warn!(asset, %e, "dep_tail poll failed");
+                    tick_ok = false;
                     continue;
                 }
                 Err(e) => {
                     tracing::error!(asset, %e, "dep_tail task panicked");
+                    tick_ok = false;
                     continue;
                 }
             };
@@ -73,10 +78,12 @@ pub async fn run(
                     Ok(Ok((pk_x, amount))) => observed.push((asset, seq, pk_x, amount)),
                     Ok(Err(e)) => {
                         tracing::warn!(asset, seq, %e, "get_pending_deposit failed; will retry next tick");
+                        tick_ok = false;
                         break;
                     }
                     Err(e) => {
                         tracing::error!(asset, seq, %e, "get_pending_deposit task panicked");
+                        tick_ok = false;
                         break;
                     }
                 }
@@ -88,7 +95,13 @@ pub async fn run(
             let advance_to = cursor + observed.len() as u64;
             if report(&engine, observed).await {
                 cursors[asset as usize] = advance_to;
+            } else {
+                tick_ok = false;
             }
+        }
+
+        if tick_ok {
+            Health::stamp(&health.watcher_last_ok);
         }
     }
 }

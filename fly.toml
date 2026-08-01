@@ -40,14 +40,18 @@ primary_region = "ord"
   auto_start_machines = true
   min_machines_running = 1
 
+  # Readiness (not just liveness): /readyz verifies the engine thread,
+  # chain sync, and watcher/batcher heartbeats, so a wedged background task
+  # or unreachable chain fails the check (issue #10). Grace covers boot
+  # reconciliation plus the first watcher/batcher pass.
   [[http_service.checks]]
     interval = "15s"
-    timeout = "5s"
+    timeout = "10s"
     # Self-bootstrap (fresh contract deploys + friendbot) can take a couple
     # of minutes on first boot after a circuit change — don't kill it early.
     grace_period = "180s"
     method = "get"
-    path = "/healthz"
+    path = "/readyz"
 
 [[mounts]]
   source = "cellarium_data"

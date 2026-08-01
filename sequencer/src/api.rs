@@ -19,6 +19,28 @@ use tokio::sync::oneshot;
 pub struct AppState {
     pub engine: mpsc::Sender<Command>,
     pub cfg: Config,
+    pub health: Arc<Health>,
+}
+
+/// Background-task heartbeats for readiness (issue #10). Each loop stamps
+/// the wall clock after a successful pass; `/readyz` fails when a heartbeat
+/// goes stale, the engine stops answering, or the chain is out of sync.
+#[derive(Default)]
+pub struct Health {
+    /// Unix seconds of the last watcher tick whose chain polls all succeeded.
+    pub watcher_last_ok: std::sync::atomic::AtomicU64,
+    /// Unix seconds of the last batcher tick that completed (oracle read ok).
+    pub batcher_last_ok: std::sync::atomic::AtomicU64,
+}
+
+impl Health {
+    pub fn stamp(cell: &std::sync::atomic::AtomicU64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        cell.store(now, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// Fixed-window per-IP limiter for the write path (issue #2 M4): POST /tx is
@@ -142,7 +164,10 @@ pub fn router(state: AppState) -> Router {
     use tower_http::cors::CorsLayer;
     let limiter = RateLimiter::default();
     Router::new()
+        // Liveness only: the process is up and serving HTTP.
         .route("/healthz", get(|| async { "ok" }))
+        // Readiness: engine, chain sync, and background-task heartbeats.
+        .route("/readyz", get(get_readyz))
         .route(
             "/tx",
             post(post_tx).route_layer(middleware::from_fn_with_state(limiter.clone(), rate_limit)),
@@ -261,6 +286,52 @@ async fn get_history(
 async fn get_batches(State(st): State<AppState>) -> Result<impl IntoResponse, ApiError> {
     let batches = ask_infallible(&st.engine, Command::GetBatches).await?;
     Ok(Json(serde_json::json!({ "batches": batches })))
+}
+
+/// Readiness (issue #10): distinct from liveness. Not-ready when the engine
+/// thread is unresponsive, boot reconciliation left us out of sync with the
+/// chain, or the watcher/batcher heartbeats have gone stale (covering both
+/// silent task death and persistent chain-poll failure).
+async fn get_readyz(State(st): State<AppState>) -> Response {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    // A heartbeat is stale after several missed ticks plus slack for one
+    // slow (but deadline-bounded) CLI call.
+    let stale_after = st.cfg.tick_secs * 6 + st.cfg.cli_timeout_secs;
+    let age = |cell: &std::sync::atomic::AtomicU64| -> Option<u64> {
+        match cell.load(std::sync::atomic::Ordering::Relaxed) {
+            0 => None, // never succeeded since boot
+            t => Some(now.saturating_sub(t)),
+        }
+    };
+
+    let status = tokio::time::timeout(
+        Duration::from_secs(5),
+        ask_infallible(&st.engine, Command::GetStatus),
+    )
+    .await;
+    let (engine_ok, chain_synced) = match status {
+        Ok(Ok(s)) => (true, s.chain_synced),
+        _ => (false, false),
+    };
+    let watcher_age = age(&st.health.watcher_last_ok);
+    let batcher_age = age(&st.health.batcher_last_ok);
+    let watcher_ok = watcher_age.is_some_and(|a| a <= stale_after);
+    let batcher_ok = batcher_age.is_some_and(|a| a <= stale_after);
+    let ready = engine_ok && chain_synced && watcher_ok && batcher_ok;
+
+    let body = Json(serde_json::json!({
+        "ready": ready,
+        "engine": engine_ok,
+        "chain_synced": chain_synced,
+        "watcher": { "ok": watcher_ok, "age_secs": watcher_age },
+        "batcher": { "ok": batcher_ok, "age_secs": batcher_age },
+        "cli_timeouts": crate::stellar::TIMEOUT_COUNT.load(std::sync::atomic::Ordering::Relaxed),
+    }));
+    let code = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    (code, body).into_response()
 }
 
 async fn get_params(State(st): State<AppState>) -> impl IntoResponse {

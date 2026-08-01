@@ -7,6 +7,7 @@
 //!   building -> proving -> proved -> submitting -> submitted -> confirmed
 //!                      \-> failed (inputs requeued)
 
+use crate::api::Health;
 use crate::config::Config;
 use crate::engine::{ApiError, BatchJob, Command};
 use crate::hexutil::fr_hex;
@@ -33,6 +34,7 @@ pub async fn run(
     engine: mpsc::Sender<Command>,
     client: Arc<dyn StellarClient>,
     cfg: Config,
+    health: Arc<Health>,
 ) {
     // Resume any batch left mid-pipeline by a crash before the normal loop.
     if let Some((batch_num, status, batch_ts, new_root)) = inflight(&engine).await {
@@ -110,6 +112,9 @@ pub async fn run(
             Ok(None) => {}
             Err(e) => tracing::warn!(%e, "try_build_batch failed"),
         }
+        // Heartbeat for readiness: this tick reached the pipeline stage with
+        // a live engine and a readable oracle.
+        Health::stamp(&health.batcher_last_ok);
     }
 }
 
