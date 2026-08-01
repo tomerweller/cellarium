@@ -269,7 +269,7 @@ The claimed `batch_ts` is set slightly behind wall-clock at build time so it
 always satisfies the contract's one-sided window despite proving latency.
 **Production requirement:** the pipeline must sustain Stellar's ~5s ledger
 cadence — prover hardware is provisioned such that bb prove(batch_repo)
-≤ ~3.5s (measured 0.80s on an M-series laptop; see REPORT.md).
+≤ ~3.5s (measured 0.5–0.8s on M-series laptops).
 
 ## Validium trust model
 
@@ -293,7 +293,7 @@ over `da_commitment`, a real oracle (Reflector), forced exits.
 
 ## Known spike caveats (production deltas)
 
-Tracked for REPORT.md: forced exits / censorship resistance; DA committee
+Tracked production deltas: forced exits / censorship resistance; DA committee
 over `da_commitment`; circuit-level `pk_x` uniqueness (honest builder +
 harness enforce find-first; a malicious prover could still open a second slot
 with the same `pk_x` without a sparse/nullifier tree — mitigated for now by

@@ -17,7 +17,7 @@ NET=testnet
 IDENTITY=cellarium-seq
 # The circuit determines the contract's immutable VK — pick the largest batch
 # whose prove time fits the 5s-cadence budget on the PROVER hardware
-# (docs/PROVING.md §3.5).
+# (DESIGN.md §Batching cadence).
 CIRCUIT="${CIRCUIT:-batch_repo}"
 
 echo "==> sequencer identity"

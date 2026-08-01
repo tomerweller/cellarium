@@ -59,7 +59,7 @@ stale (>5 min) prices.
 
 Architecture overview: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Design details: [`DESIGN.md`](DESIGN.md). Project plan and agreed refinements:
-[`PLAN.md`](PLAN.md). Measurements: [`REPORT.md`](REPORT.md).
+[`PLAN.md`](PLAN.md).
 
 ## Quick start (local, against testnet)
 

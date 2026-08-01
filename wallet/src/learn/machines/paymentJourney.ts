@@ -1,14 +1,14 @@
 // The centerpiece state machine — states named exactly as in the production
 // sequencer (sequencer/src/engine.rs + batcher.rs): a payment is admitted to
 // the mempool, then the eager batcher builds -> proves -> submits ->
-// confirms. Timings are the MEASURED cloud numbers (docs/PROVING.md §3.5).
+// confirms. Timings approximate the measured cloud pipeline.
 // All balance/nonce/root arithmetic here uses the real crypto via demo.ts.
 import { assign, setup } from 'xstate';
 import { sign, txMessage, verify } from '../../crypto/schnorr';
 import { frToHex32 } from '../../crypto/fields';
 import { DemoAccount, demoRoot, makeAccounts } from '../demo';
 
-export const BATCH_SLOTS = 4; // like the live deployment (batch_n4)
+export const BATCH_SLOTS = 4; // small batch, sized for the demo animation
 export const TIMINGS = { building: 500, proving: 1300, submitting: 900, confirmed: 900 };
 
 export interface JourneyTx {

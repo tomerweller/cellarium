@@ -11,7 +11,8 @@
 # Contract ids therefore live on the volume (instance.env), NOT here; the
 # wallet discovers them at runtime via GET /params.
 #
-# VM sizing is governed by the 5s-cadence requirement (docs/PROVING.md):
+# VM sizing is governed by the 5s-cadence requirement (DESIGN.md §Batching
+# cadence):
 # bb prove(batch_repo) must stay ≤ ~3.5s so every Stellar ledger can carry a
 # batch. performance-2x is the starting point; `fly scale vm performance-4x`
 # is the knob if the benchmark gate misses.
@@ -58,9 +59,8 @@ primary_region = "ord"
   destination = "/data"
 
 [[vm]]
-  # Dedicated cores per the 5s-cadence requirement (docs/PROVING.md §3.5):
-  # shared CPUs throttle to a small baseline once burst credits drain, which
-  # blows the proving budget under sustained load. performance-2x is ample
-  # for batch_n4 (~1s prove).
+  # Dedicated cores per the 5s-cadence requirement (DESIGN.md §Batching
+  # cadence): shared CPUs throttle to a small baseline once burst credits
+  # drain, which blows the proving budget under sustained load.
   size = "performance-2x"
   memory = "4gb"

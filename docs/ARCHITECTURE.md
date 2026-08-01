@@ -12,9 +12,7 @@ This document is the map: what the components are, how they talk to each
 other, and where the trust boundaries sit. For byte-level hash layouts,
 domains, and message formats see [DESIGN.md](../DESIGN.md) (the single source
 of truth shared by circuits, contract, and harness). For the project plan see
-[PLAN.md](../PLAN.md); for measurements see [REPORT.md](../REPORT.md);
-for proving throughput see [PROVING.md](PROVING.md); for the test strategy
-see [TESTING.md](TESTING.md).
+[PLAN.md](../PLAN.md).
 
 ## System diagram
 
@@ -164,7 +162,7 @@ The same cryptography is implemented three times — Noir (circuits), Rust
   and on-chain hashing are the same code path.
 - **Golden vectors**: fixtures pinned across circuit tests
   (`fixtures/`), harness tests, and wallet vitest suites (interest math,
-  signing messages, tree roots). See [TESTING.md](TESTING.md).
+  signing messages, tree roots).
 
 ## Toolchain (pinned)
 
@@ -179,8 +177,7 @@ inputs. Exact versions and verifier invariants: DESIGN.md §Toolchain.
 - **State validity is trustless** (within the single-operator model): every
   root advance is proven; bilateral opens, borrower-only closes,
   condition-gated defaults/liquidations, exact interest, and per-asset value
-  conservation are all circuit-enforced (invariant-by-invariant map in
-  REPORT.md).
+  conservation are all circuit-enforced.
 - **Batch submission is operator-only**: the constructor pins the sequencer
   address. This is a deliberate mitigation — without in-circuit `pk_x`
   uniqueness, a permissionless prover could initialize a duplicate account
@@ -197,8 +194,8 @@ inputs. Exact versions and verifier invariants: DESIGN.md §Toolchain.
 - **Timestamps can't be future-dated**: the contract's one-sided window
   means a batch can never trigger a premature default.
 
-Production hardening path (out of spike scope, tracked in DESIGN.md and
-REPORT.md): forced exits / censorship resistance, a DA committee over
+Production hardening path (out of spike scope, tracked in DESIGN.md):
+forced exits / censorship resistance, a DA committee over
 `da_commitment`, in-circuit `pk_x` uniqueness, a real oracle (Reflector),
 VK rotation, sequencer decentralization, and a ZK-flavored proof (the pinned
 verifier is non-ZK-only, so witness privacy against proof-holders is
@@ -214,13 +211,10 @@ sequencer/      Operator backend: API, engine actor, watchers, batcher, SQLite, 
 wallet/         Browser repo desk: React UI + independent TS crypto stack
 fixtures/       Golden vectors pinned across circuit/harness/wallet tests
 scripts/        Bootstrap, e2e (local + testnet)
-docs/           This file, PROVING.md (throughput), TESTING.md (test architecture)
+docs/           This file
 ```
 
 ## Where to go next
 
 - **Hash/message formats, domains, envelope shape** → [DESIGN.md](../DESIGN.md)
 - **Milestones, security invariants, agreed refinements** → [PLAN.md](../PLAN.md)
-- **Measured costs (circuit, proving, on-chain) and verdicts** → [REPORT.md](../REPORT.md)
-- **Proving latency vs the 5 s ledger, recursion analysis** → [PROVING.md](PROVING.md)
-- **Test inventory, gap analysis, layered test architecture** → [TESTING.md](TESTING.md)
