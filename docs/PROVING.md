@@ -220,7 +220,7 @@ in practice **bb prove(CIRCUIT_PKG) ≤ ~3.5s** leaves adequate headroom.
 Deployment hardware must be provisioned to meet this, and the batch size is
 chosen as the largest N whose prove time fits the budget on that hardware.
 
-Cloud reference (Fly.io, `soribium` app; measured 2026-07-06, 3 runs each):
+Cloud reference (Fly.io, `cellarium` app; measured 2026-07-06, 3 runs each):
 
 | VM | circuit | bb prove | meets ≤3.5s budget? |
 |---|---|---|---|

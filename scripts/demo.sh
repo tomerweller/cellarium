@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 SCRATCH="${SCRATCH:-$(mktemp -d)}"
 PORT=8093
 URL="http://127.0.0.1:$PORT"
-IDENTITY=soribium-demo
+IDENTITY=cellarium-demo
 SIM="cargo run -q -p sequencer --bin wallet-sim --"
 
 say()  { printf '\n\033[1;33m%s\033[0m\n' "$*"; }
@@ -59,7 +59,7 @@ export CONTRACT_ID=$ROLLUP TOKEN_ID=$TOKEN TUST_ID=$TUST ORACLE_ID=$ORACLE \
   SEQUENCER_SECRET=$SEQ_SECRET SEQUENCER_ADDRESS=$SEQ_ADDR \
   RPC_URL=https://soroban-testnet.stellar.org \
   DB_PATH="$SCRATCH/demo.db" LISTEN_ADDR="127.0.0.1:$PORT" BATCH_MAX_WAIT_SECS=15 \
-  SORIBIUM_URL="$URL" SEQ_KEY="$IDENTITY"
+  CELLARIUM_URL="$URL" SEQ_KEY="$IDENTITY"
 export NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 cargo run -q --release -p sequencer > "$SCRATCH/demo.log" 2>&1 &
 SEQ_PID=$!

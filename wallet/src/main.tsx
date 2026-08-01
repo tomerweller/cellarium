@@ -44,7 +44,7 @@ const router = createBrowserRouter(
       ],
     },
   ],
-  // Subpath hosting (e.g. GitHub Pages /soribium/).
+  // Subpath hosting (e.g. GitHub Pages /cellarium/).
   { basename: import.meta.env.BASE_URL },
 );
 

@@ -37,7 +37,7 @@ async fn run() -> Result<(), String> {
     }
 
     let cfg = Config::from_env()?;
-    tracing::info!(contract = %cfg.contract_id, circuit = %cfg.circuit_pkg, "starting Soribium sequencer");
+    tracing::info!(contract = %cfg.contract_id, circuit = %cfg.circuit_pkg, "starting Cellarium sequencer");
 
     let conn = db::open(&cfg.db_path).map_err(|e| format!("db open: {e}"))?;
 

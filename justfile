@@ -51,7 +51,7 @@ demo:
 e2e-local: build-contract
     scripts/e2e_local.sh
 
-# Deploy a fresh Soribium instance to testnet + write .env
+# Deploy a fresh Cellarium instance to testnet + write .env
 bootstrap:
     scripts/bootstrap_testnet.sh
 

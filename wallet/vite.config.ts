@@ -35,7 +35,7 @@ function cspPlugin(): Plugin {
 }
 
 export default defineConfig({
-  // Subpath hosting (GitHub Pages serves at /soribium/); CI sets BASE_PATH.
+  // Subpath hosting (GitHub Pages serves at /cellarium/); CI sets BASE_PATH.
   base: process.env.BASE_PATH ?? '/',
   plugins: [react(), cspPlugin()],
   server: {

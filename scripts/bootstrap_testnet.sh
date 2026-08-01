@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Bootstrap a fresh Soribium deployment on Stellar testnet:
+# Bootstrap a fresh Cellarium deployment on Stellar testnet:
 #   - generate + friendbot-fund the sequencer account
 #   - build the rollup wasm and export the batch_n16 verification key
 #   - deploy the native-asset SAC (the cash leg) + the rollup
@@ -14,7 +14,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 NET=testnet
-IDENTITY=soribium-seq
+IDENTITY=cellarium-seq
 # The circuit determines the contract's immutable VK — pick the largest batch
 # whose prove time fits the 5s-cadence budget on the PROVER hardware
 # (docs/PROVING.md §3.5).
@@ -49,7 +49,7 @@ echo "==> tUST admin identity + token contract (collateral leg)"
 # Pure Soroban SEP-41 token (contracts/tust): no classic trustlines, so any
 # G/C address can receive it — the e2e and the browser demo need no
 # change-trust step. Supply cap <= u64::MAX enforced in the token itself.
-TUST_ADMIN_IDENTITY=soribium-tust-admin
+TUST_ADMIN_IDENTITY=cellarium-tust-admin
 stellar keys generate "$TUST_ADMIN_IDENTITY" --network "$NET" --fund 2>/dev/null \
   || stellar keys fund "$TUST_ADMIN_IDENTITY" --network "$NET" 2>/dev/null || true
 TUST_ADMIN=$(stellar keys address "$TUST_ADMIN_IDENTITY")
@@ -58,7 +58,7 @@ TUST=$(stellar contract deploy --wasm target/wasm32v1-none/release/tust.wasm \
 echo "    $TUST (admin $TUST_ADMIN)"
 
 echo "==> oracle admin identity + oracle contract"
-ORACLE_ADMIN_IDENTITY=soribium-oracle-admin
+ORACLE_ADMIN_IDENTITY=cellarium-oracle-admin
 stellar keys generate "$ORACLE_ADMIN_IDENTITY" --network "$NET" --fund 2>/dev/null \
   || stellar keys fund "$ORACLE_ADMIN_IDENTITY" --network "$NET" 2>/dev/null || true
 ORACLE_ADMIN=$(stellar keys address "$ORACLE_ADMIN_IDENTITY")

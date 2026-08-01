@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 [ -f .env ] || { echo "no .env — run scripts/bootstrap_testnet.sh first"; exit 1; }
 set -a; . ./.env; set +a
 
-APP="${FLY_APP:-soribium}"
+APP="${FLY_APP:-cellarium}"
 
 echo "==> patching fly.toml [env] with public identifiers"
 sed -i '' \

@@ -1,32 +1,33 @@
-# Project Plan: Soribium-Repo — a Private Repo ZK-Rollup on Stellar
+# Project Plan: Cellarium — a Private Repo ZK-Rollup on Stellar
 
-A prototype extending **Soribium** (`github.com/tomerweller/soribium`) from a payments
-validium into a **private bilateral repo venue**: cash lent against tokenized-Treasury
+A prototype extending the project's payments-validium base into a **private
+bilateral repo venue**: cash lent against tokenized-Treasury
 collateral, fixed term and rate, timestamp-enforced maturity, oracle-driven margining —
 all off-chain in a Noir circuit, settled on Stellar testnet via one UltraHonk proof per
 batch. Position sizes, rates, and counterparties are invisible on L1; only escrow
 totals, state roots, and commitments touch the chain.
 
-**Base:** fork of Soribium `main`. Reuse its toolchain, harness, sequencer, contract
-skeleton, and wallet. Read `DESIGN.md` and `REPORT.md` in the repo root before writing
-any code — they are the source of truth for hash layouts, toolchain pins, and measured
-budgets. This plan describes deltas against them.
+**Base:** the payments-validium codebase in this repo (circuits, harness,
+sequencer, contract skeleton, wallet). Read `DESIGN.md` and `REPORT.md` in the
+repo root before writing any code — they are the source of truth for hash
+layouts, toolchain pins, and measured budgets. This plan describes deltas
+against them.
 
 **Scope decisions (already made — do not revisit):**
 
-- Fork/extend Soribium; do not restructure the workspace.
+- Extend the payments base in place; do not restructure the workspace.
 - Phase 1 + margining: intraday/term repo with oracle price and liquidation. No
   rehypothecation, no DAC, no forced exits (tracked as out of scope).
 - Assets: native XLM = cash leg; a newly deployed mock SEP-41 token `tUST`
   (7 decimals, mintable by an admin key) = collateral leg.
 - UI: evolve the existing React wallet into a minimal repo desk.
-- Testnet only. Not audited. Same trust model as Soribium (validium, single sequencer).
+- Testnet only. Not audited. Same trust model as the payments base (validium, single sequencer).
 
 ---
 
 ## 0. Ground rules
 
-1. **Toolchain stays pinned** as in Soribium's `DESIGN.md` (nargo, bb, soroban-sdk,
+1. **Toolchain stays pinned** as in the payments base's `DESIGN.md` (nargo, bb, soroban-sdk,
    ultrahonk-soroban-verifier rev, rust). Do not upgrade anything unless a task is
    impossible without it; if you must, record why in `DESIGN.md`.
 2. **The three-way hash contract is sacred.** Every hash layout must be identical in
@@ -48,7 +49,7 @@ budgets. This plan describes deltas against them.
 
 ---
 
-## 1. Target design (deltas from payments Soribium)
+## 1. Target design (deltas from the payments base)
 
 ### 1.1 State
 
@@ -86,7 +87,7 @@ all closes/defaults/liquidations before all opens).
 
 ### 1.2 New domain separators
 
-Extend the domain table (values continue from Soribium's 7):
+Extend the domain table (values continue from the payments base's 7):
 
 | Domain | Value | Use |
 |---|---|---|
@@ -101,7 +102,7 @@ in envelopes.
 
 ### 1.3 Batch operations
 
-Fixed-size arrays with `is_active` padding, exactly like payments Soribium (padding
+Fixed-size arrays with `is_active` padding, exactly like the payments base (padding
 freezes roots and fold accumulators; the padding keypair remains blacklisted for
 active ops). Suggested starting sizes: `D=4` deposits, `O=2` opens, `C=2` closes,
 `L=2` liquidations/defaults, `T=4` transfers, per batch. Make all of them const
@@ -111,7 +112,7 @@ generics/parameters from day one so we can grow them after measuring.
 the contract per asset (two queues; `deposit_count` in the envelope becomes a pair).
 Fold: `acc' = Poseidon2([DOMAIN_DEP2, acc, Poseidon2([pk_x, asset, amount])])`.
 
-**Transfer / withdraw** — keep Soribium's L2 payment op, extended with `asset`.
+**Transfer / withdraw** — keep the existing L2 payment op, extended with `asset`.
 Withdrawal fold uses `DOMAIN_WD2` and binds `(address_field, asset, amount)`.
 
 **Repo open** — bilateral. Message:
@@ -122,7 +123,7 @@ open_msg = Poseidon2([DOMAIN_OPEN, borrower_pk_x, lender_pk_x,
 ```
 
 Circuit verifies **two** Grumpkin-Schnorr signatures (borrower and lender, same scheme
-and defenses as Soribium's tx signature: range-checked s, on-curve checks, even-y
+and defenses as Cellarium's tx signature: range-checked s, on-curve checks, even-y
 keys), checks `lender.cash ≥ cash`, `borrower.coll ≥ coll`,
 `coll_value_at_open ≥ cash × (1 + haircut_bps/10⁴)` using the batch price (see 1.5),
 `maturity_ts > batch_ts`, both nonces match and increment, then: lender.cash −= cash,
@@ -175,7 +176,7 @@ main(old_state_root: pub, new_state_root: pub,
 - `price` — tUST/XLM price in fixed-point 1e7, read by `submit_batch` from the oracle
   contract (see 1.6) inside the same invocation, and bound as a public input. Reject
   if the oracle's `last_updated` is older than 5 minutes.
-- Everything else as in Soribium (`da_commitment` fold now runs over every active op's
+- Everything else as in the payments base (`da_commitment` fold now runs over every active op's
   message/record so the blob fully reconstructs both trees).
 
 ### 1.6 Oracle (mock)
@@ -188,7 +189,7 @@ The e2e uses it to trigger a liquidation deterministically.
 
 ### 1.7 Contract (`contracts/rollup/`)
 
-`submit_batch(envelope)` extends Soribium's: two deposit queues and counts, withdrawal
+`submit_batch(envelope)` extends the payments base's: two deposit queues and counts, withdrawal
 list entries gain `asset`, reads oracle price + ledger timestamp and places both into
 the public-input blob (7 × 32 bytes = 224-byte PI blob), custody of **two** SACs
 (XLM SAC + tUST SAC; addresses fixed at init). Keep the existing negative-test posture:
@@ -277,7 +278,7 @@ division exact vs harness. Withdrawal cannot be redirected, re-amounted, or re-a
 Stale/failed oracle blocks batches containing liquidations but must not block pure
 payment batches (decide: either two circuit variants or always require a fresh price —
 **always require it**; simpler, and the sequencer controls the mock oracle anyway —
-document this). Replay: old_root binding covers it as in Soribium. Padding keypair
+document this). Replay: old_root binding covers it as in the payments base. Padding keypair
 blacklisted in every new active-op position (both roles).
 
 ## 4. Out of scope (do not build)
@@ -332,9 +333,9 @@ These amend the sections above and take precedence where they conflict.
    future-dated batch_ts is impossible; sequencer time-delay only ever favors
    the borrower. Document in DESIGN.md.
 
-4. **Repo setup:** clone `tomerweller/soribium` into `~/cellarium`, work
-   locally on a branch. GitHub repo creation and final project naming
-   deferred until there's something to push.
+4. **Repo setup:** work locally on a branch over the payments base. GitHub
+   repo creation and final project naming deferred until there's something
+   to push (done: the project is named Cellarium).
 
 ### 6.2 Implementer defaults (flagged; change only if the user objects)
 

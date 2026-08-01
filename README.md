@@ -1,10 +1,9 @@
-# Cellarium (Soribium-Repo)
+# Cellarium
 
 A **private bilateral repo venue** running as a ZK-rollup (validium) on the
-Stellar network — an extension of [Soribium](https://github.com/tomerweller/soribium)
-from payments to repurchase agreements. Built with [Noir](https://noir-lang.org)
-and UltraHonk proofs verified on Soroban via Protocol 25/26's native BN254 +
-Poseidon host functions.
+Stellar network. Built with [Noir](https://noir-lang.org) and UltraHonk
+proofs verified on Soroban via Protocol 25/26's native BN254 + Poseidon host
+functions.
 
 Cash (native XLM) is lent against tokenized-Treasury collateral (a mock
 SEP-41 token, `tUST`) at a fixed term and rate. Maturity is

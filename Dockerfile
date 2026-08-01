@@ -1,11 +1,11 @@
-# Soribium sequencer image.
+# Cellarium sequencer image.
 #
 # Targets linux/amd64: Barretenberg (bb) publishes only amd64-linux binaries
 # for 0.87.0, so this is the portable choice for real deployment (Fly.io et
 # al. run amd64). On an Apple Silicon dev box either run the sequencer
 # natively (`just sequencer`) or run this image under emulation with adequate
 # RAM (bb needs ~1GB for n16). Build explicitly:
-#   docker build --platform linux/amd64 -t soribium-sequencer .
+#   docker build --platform linux/amd64 -t cellarium-sequencer .
 FROM --platform=linux/amd64 rust:1.95-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./

@@ -38,7 +38,7 @@ pub trait StellarClient: Send + Sync {
 /// Identity name the secret is registered under at boot. The raw S… secret
 /// must never appear on a CLI argv (visible in `ps`/audit logs — issue #2
 /// H4); it reaches the CLI exactly once, via environment, at registration.
-const IDENTITY: &str = "soribium-seq-runtime";
+const IDENTITY: &str = "cellarium-seq-runtime";
 
 pub struct CliClient {
     pub rpc_url: String,

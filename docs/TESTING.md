@@ -1,4 +1,4 @@
-# Soribium Test-Suite Audit & Proposed Architecture
+# Cellarium Test-Suite Audit & Proposed Architecture
 
 Repo: `/Users/tomer/dev/stellar-zk-rollup` (branch `security/circuit-remediation`)
 Date: 2026-07-16. Read-only static analysis; no suites were executed.

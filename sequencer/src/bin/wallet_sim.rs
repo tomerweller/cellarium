@@ -13,7 +13,7 @@
 //!   wallet-sim close <borrower_sk> <pos_index>
 //!   wallet-sim positions <pk_x_hex>
 //!
-//! Env: SORIBIUM_URL (default http://127.0.0.1:8080), CONTRACT_ID, SEQ_KEY
+//! Env: CELLARIUM_URL (default http://127.0.0.1:8080), CONTRACT_ID, SEQ_KEY
 //! (stellar CLI identity name or secret), plus standard stellar network vars.
 
 use harness::batch::tx_message;
@@ -23,7 +23,7 @@ use harness::poseidon::{to_hex, Fr, Hasher};
 use harness::tree::Asset;
 
 fn seq_url() -> String {
-    std::env::var("SORIBIUM_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into())
+    std::env::var("CELLARIUM_URL").unwrap_or_else(|_| "http://127.0.0.1:8080".into())
 }
 
 fn keypair(sk: u64) -> Keypair {

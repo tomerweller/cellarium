@@ -23,7 +23,7 @@ export function Layout() {
   return (
     <div className={wide ? 'app app-wide' : 'app'}>
       <header>
-        <span className="wordmark">Soribium<span className="cursor" /></span>
+        <span className="wordmark">Cellarium<span className="cursor" /></span>
         {wallet && <AccountMenu />}
       </header>
       <nav>
@@ -32,8 +32,6 @@ export function Layout() {
             {label}
           </NavLink>
         ))}
-        {/* Static talk deck, served from the public dir (not a SPA route). */}
-        <a href={`${import.meta.env.BASE_URL}deck/`}>Deck</a>
       </nav>
       <main>
         {isError && <Banner tone="warn">Can't reach the sequencer — showing last-known state.</Banner>}

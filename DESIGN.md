@@ -1,6 +1,6 @@
-# Soribium — Design Spec
+# Cellarium — Design Spec
 
-Soribium is a multi-asset ZK-rollup operating as a **validium** on Stellar
+Cellarium is a multi-asset ZK-rollup operating as a **validium** on Stellar
 testnet — being extended into a private bilateral repo venue (PLAN.md): batch
 transaction data lives off-chain (served by the sequencer's DA endpoint) and
 is bound on-chain by a proven commitment.

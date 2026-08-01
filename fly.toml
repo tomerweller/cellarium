@@ -1,11 +1,11 @@
-# Soribium sequencer on Fly.io. Deploy with scripts/deploy_fly.sh (reads the
+# Cellarium sequencer on Fly.io. Deploy with scripts/deploy_fly.sh (reads the
 # bootstrap-generated .env, sets the secret, patches [env], remote-builds).
 #
 # VM sizing is governed by the 5s-cadence requirement (docs/PROVING.md):
 # bb prove(batch_n16) must stay ≤ ~3.5s so every Stellar ledger can carry a
 # batch. performance-2x is the starting point; `fly scale vm performance-4x`
 # is the knob if the benchmark gate misses.
-app = "soribium"
+app = "cellarium"
 primary_region = "iad"
 
 [build]
@@ -43,7 +43,7 @@ primary_region = "iad"
     path = "/healthz"
 
 [[mounts]]
-  source = "soribium_data"
+  source = "cellarium_data"
   destination = "/data"
 
 [[vm]]

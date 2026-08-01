@@ -1,4 +1,4 @@
-// Soribium production batch: N=16 transactions, D=4 deposits. Public inputs
+// Cellarium production batch: N=16 transactions, D=4 deposits. Public inputs
 // (exactly 5, order matters - the contract assembles the same blob):
 // old_root, new_root, deposit_hash, withdraw_hash, da_commitment.
 use rollup_lib::batch::batch;

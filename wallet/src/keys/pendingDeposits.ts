@@ -3,7 +3,7 @@
 // The sequencer's per-account API has no "incoming deposit" signal, so the
 // wallet tracks these locally to power the "settling" indicator, clearing an
 // entry once the account balance reflects it.
-const KEY = 'soribium.v1.pendingDeposits';
+const KEY = 'cellarium.v1.pendingDeposits';
 
 export interface PendingDeposit {
   pkX: string;

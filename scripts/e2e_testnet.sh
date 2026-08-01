@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Soribium end-to-end acceptance test against public testnet, driving the
+# Cellarium end-to-end acceptance test against public testnet, driving the
 # NATIVE sequencer (the proving path bb needs is native arm64/amd64 here).
 # Deploys fresh contracts (rollup + tUST + oracle), boots the sequencer, then:
 #   M1: deposits XLM and tUST to two users, L2-transfers each asset,
@@ -21,7 +21,7 @@ cd "$(dirname "$0")/.."
 SCRATCH="${SCRATCH:-$(mktemp -d)}"
 PORT=8091
 URL="http://127.0.0.1:$PORT"
-IDENTITY=soribium-e2e
+IDENTITY=cellarium-e2e
 SIM="cargo run -q -p sequencer --bin wallet-sim --"
 
 fail() { echo "ASSERT FAILED: $1" >&2; exit 1; }
@@ -62,7 +62,7 @@ export CONTRACT_ID=$ROLLUP TOKEN_ID=$TOKEN TUST_ID=$TUST ORACLE_ID=$ORACLE SEQUE
 export RPC_URL=https://soroban-testnet.stellar.org
 export NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 export DB_PATH="$SCRATCH/e2e.db" LISTEN_ADDR="127.0.0.1:$PORT" BATCH_MAX_WAIT_SECS=15
-export SORIBIUM_URL="$URL" SEQ_KEY="$IDENTITY"
+export CELLARIUM_URL="$URL" SEQ_KEY="$IDENTITY"
 rm -f "$DB_PATH"
 cargo run -q --release -p sequencer > "$SCRATCH/e2e.log" 2>&1 &
 SEQ_PID=$!

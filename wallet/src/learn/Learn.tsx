@@ -1,4 +1,4 @@
-// The interactive explainer: how Soribium works, for developers who know
+// The interactive explainer: how Cellarium works, for developers who know
 // blockchains but not ZK. Every widget computes real hashes/signatures with
 // the same crypto modules the wallet signs with.
 import { useStatus } from '../api/queries';
@@ -27,7 +27,7 @@ export default function Learn() {
   return (
     <div className="learn">
       <div className="panel hero">
-        <div className="eyebrow">How Soribium works</div>
+        <div className="eyebrow">How Cellarium works</div>
         <div className="amount learn-hero-title">
           A payments rollup where your browser checks the math.
         </div>
@@ -110,10 +110,10 @@ export default function Learn() {
         <DaVerifier />
         <p className="muted" style={{ fontSize: '0.8rem', marginTop: '0.8rem' }}>
           Going deeper: the{' '}
-          <a href="https://github.com/tomerweller/soribium" target="_blank" rel="noreferrer">source</a>,{' '}
-          <a href="https://github.com/tomerweller/soribium/blob/main/DESIGN.md" target="_blank" rel="noreferrer">DESIGN.md</a>{' '}
+          <a href="https://github.com/tomerweller/cellarium" target="_blank" rel="noreferrer">source</a>,{' '}
+          <a href="https://github.com/tomerweller/cellarium/blob/main/DESIGN.md" target="_blank" rel="noreferrer">DESIGN.md</a>{' '}
           (hash domains, envelope, trust model), and{' '}
-          <a href="https://github.com/tomerweller/soribium/blob/main/docs/PROVING.md" target="_blank" rel="noreferrer">PROVING.md</a>{' '}
+          <a href="https://github.com/tomerweller/cellarium/blob/main/docs/PROVING.md" target="_blank" rel="noreferrer">PROVING.md</a>{' '}
           (measured proving benchmarks, recursion analysis). Or just open the Explorer tab — the
           roots-match check there is this whole page in one line.
         </p>

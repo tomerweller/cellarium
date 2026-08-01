@@ -11,9 +11,9 @@ import { canonicalizeSk } from './grumpkin';
 /** The message the wallet signs. Human-readable (Freighter shows it) and
  *  versioned so we can rotate the derivation without ambiguity. */
 export const KEY_DERIVATION_MESSAGE =
-  'Soribium account key derivation (v1)\n\nSign to create or restore your rollup account. This does not move funds.';
+  'Cellarium account key derivation (v1)\n\nSign to create or restore your rollup account. This does not move funds.';
 
-const DOMAIN = 'soribium/spend-key/v1';
+const DOMAIN = 'cellarium/spend-key/v1';
 
 /**
  * sk = SHA-256(DOMAIN || signature) reduced into Grumpkin's scalar field.

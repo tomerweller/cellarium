@@ -1,4 +1,4 @@
-# Soribium local deployment: sequencer + wallet, talking to public Stellar
+# Cellarium local deployment: sequencer + wallet, talking to public Stellar
 # testnet. Run scripts/bootstrap_testnet.sh first to deploy the contract and
 # write .env.
 #

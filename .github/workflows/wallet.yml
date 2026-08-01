@@ -36,8 +36,8 @@ jobs:
       - name: Build
         working-directory: wallet
         env:
-          VITE_SEQUENCER_URL: https://soribium.fly.dev
-          BASE_PATH: /soribium/
+          VITE_SEQUENCER_URL: https://cellarium.fly.dev
+          BASE_PATH: /cellarium/
         run: |
           npm run build
           cp dist/index.html dist/404.html   # SPA deep-link fallback on Pages

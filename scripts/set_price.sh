@@ -17,10 +17,10 @@ fi
 NET="${NETWORK:-testnet}"
 
 # Prefer the bootstrap identity; fall back to the secret from .env.
-if stellar keys address soribium-oracle-admin >/dev/null 2>&1; then
-  SOURCE=soribium-oracle-admin
+if stellar keys address cellarium-oracle-admin >/dev/null 2>&1; then
+  SOURCE=cellarium-oracle-admin
 else
-  : "${ORACLE_ADMIN_SECRET:?no soribium-oracle-admin identity and no ORACLE_ADMIN_SECRET}"
+  : "${ORACLE_ADMIN_SECRET:?no cellarium-oracle-admin identity and no ORACLE_ADMIN_SECRET}"
   SOURCE="$ORACLE_ADMIN_SECRET"
 fi
 

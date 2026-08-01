@@ -12,20 +12,20 @@ SCRATCH=/private/tmp/claude-501/-Users-tomer-dev-stellar-zk-rollup/62c6f966-91af
 export CONTRACT_ID=$(cat "$SCRATCH/rollup.txt")
 export TOKEN_ID=$(cat "$SCRATCH/token.txt")
 export SEQUENCER_SECRET=$(cat "$SCRATCH/seq_secret.txt")
-export SEQUENCER_ADDRESS=$(stellar keys address soribium-seq)
+export SEQUENCER_ADDRESS=$(stellar keys address cellarium-seq)
 export RPC_URL=https://soroban-testnet.stellar.org
 export NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 export DB_PATH="$SCRATCH/seq.db"
 export LISTEN_ADDR=127.0.0.1:8090
 export BATCH_MAX_WAIT_SECS=15
-export SORIBIUM_URL=http://127.0.0.1:8090
-export SEQ_KEY=soribium-seq
+export CELLARIUM_URL=http://127.0.0.1:8090
+export SEQ_KEY=cellarium-seq
 rm -f "$DB_PATH"
 
 SIM="cargo run -q -p sequencer --bin wallet-sim --"
 ALICE_PK=$($SIM pk 101 | grep pk_x | cut -d= -f2)
 BOB_PK=$($SIM pk 202 | grep pk_x | cut -d= -f2)
-WD_DEST=$(stellar keys address soribium-seq)  # withdraw back to the seq G-addr
+WD_DEST=$(stellar keys address cellarium-seq)  # withdraw back to the seq G-addr
 echo "alice=$ALICE_PK"
 echo "bob=$BOB_PK"
 
@@ -41,22 +41,22 @@ $SIM deposit "$BOB_PK" 500000 >/dev/null
 
 echo "==> waiting for watcher to observe deposits"
 for i in $(seq 1 12); do
-  PENDING=$(curl -s "$SORIBIUM_URL/status" | grep -o '"pending_deposits":[0-9]*' | cut -d: -f2)
+  PENDING=$(curl -s "$CELLARIUM_URL/status" | grep -o '"pending_deposits":[0-9]*' | cut -d: -f2)
   [ "$PENDING" = "2" ] && break
   sleep 3
 done
-curl -s "$SORIBIUM_URL/status"; echo
+curl -s "$CELLARIUM_URL/status"; echo
 
 echo "==> a batch with just deposits will auto-fire after BATCH_MAX_WAIT_SECS"
 for i in $(seq 1 20); do
-  BN=$(curl -s "$SORIBIUM_URL/status" | grep -o '"batch_num":[0-9]*' | cut -d: -f2)
+  BN=$(curl -s "$CELLARIUM_URL/status" | grep -o '"batch_num":[0-9]*' | cut -d: -f2)
   [ "$BN" = "1" ] && break
   sleep 5
 done
-echo "batch_num after deposit batch: $(curl -s "$SORIBIUM_URL/status" | grep -o '"batch_num":[0-9]*')"
+echo "batch_num after deposit batch: $(curl -s "$CELLARIUM_URL/status" | grep -o '"batch_num":[0-9]*')"
 
 echo "==> alice balance/nonce"
-curl -s "$SORIBIUM_URL/account/$ALICE_PK"; echo
+curl -s "$CELLARIUM_URL/account/$ALICE_PK"; echo
 
 echo "==> L2 transfer alice->bob 200000 (nonce 0) + withdrawal bob->seq 100000 (nonce 0)"
 $SIM send 101 "$BOB_PK" 200000 0
@@ -64,16 +64,16 @@ $SIM withdraw 202 "$WD_DEST" 100000 0
 
 echo "==> waiting for second batch"
 for i in $(seq 1 20); do
-  BN=$(curl -s "$SORIBIUM_URL/status" | grep -o '"batch_num":[0-9]*' | cut -d: -f2)
+  BN=$(curl -s "$CELLARIUM_URL/status" | grep -o '"batch_num":[0-9]*' | cut -d: -f2)
   [ "$BN" = "2" ] && break
   sleep 5
 done
 
 echo "==> final status + balances"
-curl -s "$SORIBIUM_URL/status"; echo
-echo "alice:"; curl -s "$SORIBIUM_URL/account/$ALICE_PK"; echo
-echo "bob:"; curl -s "$SORIBIUM_URL/account/$BOB_PK"; echo
-echo "da blob for batch 2:"; curl -s "$SORIBIUM_URL/da/2" | head -c 300; echo
-echo "==> on-chain root:"; stellar contract invoke --id "$CONTRACT_ID" --source soribium-seq --network testnet --send=no -- root 2>/dev/null
+curl -s "$CELLARIUM_URL/status"; echo
+echo "alice:"; curl -s "$CELLARIUM_URL/account/$ALICE_PK"; echo
+echo "bob:"; curl -s "$CELLARIUM_URL/account/$BOB_PK"; echo
+echo "da blob for batch 2:"; curl -s "$CELLARIUM_URL/da/2" | head -c 300; echo
+echo "==> on-chain root:"; stellar contract invoke --id "$CONTRACT_ID" --source cellarium-seq --network testnet --send=no -- root 2>/dev/null
 
 echo "==> log tail"; tail -15 "$SCRATCH/seq.log"

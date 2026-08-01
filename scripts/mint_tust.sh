@@ -16,6 +16,6 @@ fi
 : "${TUST_ID:?TUST_ID not set (run just bootstrap)}"
 NET="${NETWORK:-testnet}"
 
-stellar contract invoke --id "$TUST_ID" --source soribium-tust-admin --network "$NET" -- \
+stellar contract invoke --id "$TUST_ID" --source cellarium-tust-admin --network "$NET" -- \
   mint --to "$DEST" --amount "$AMOUNT" >/dev/null
 echo "minted $AMOUNT tUST base units to $DEST"

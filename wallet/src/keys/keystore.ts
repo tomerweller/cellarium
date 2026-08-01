@@ -3,8 +3,8 @@
 import { frToHex32, hexToFr, randScalar } from '../crypto/fields';
 import { pkFromSk } from '../crypto/grumpkin';
 
-const STORAGE_KEY = 'soribium.v1.sk';
-const LINK_KEY = 'soribium.v1.linkedAddress';
+const STORAGE_KEY = 'cellarium.v1.sk';
+const LINK_KEY = 'cellarium.v1.linkedAddress';
 
 export interface Wallet {
   sk: bigint;

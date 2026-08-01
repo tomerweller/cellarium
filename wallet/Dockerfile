@@ -1,4 +1,4 @@
-# Soribium wallet: static Vite build served by nginx, which reverse-proxies
+# Cellarium wallet: static Vite build served by nginx, which reverse-proxies
 # /api to the sequencer (same-origin → no CORS in the compose deployment).
 # Portable across arch (pure JS build). Deploys unchanged to Vercel by
 # pointing VITE_SEQUENCER_URL at the sequencer instead of using the proxy.

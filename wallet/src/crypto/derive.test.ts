@@ -9,13 +9,13 @@ const SIG = Uint8Array.from({ length: 64 }, (_, i) => (i * 7 + 3) & 0xff);
 
 describe('Freighter-signature key derivation', () => {
   it('matches the pinned v1 golden vector (DO NOT casually update)', async () => {
-    // sk = canonicalize(SHA-256("soribium/spend-key/v1" || sig) mod N_GRUMPKIN).
+    // sk = canonicalize(SHA-256("cellarium/spend-key/v1" || sig) mod N_GRUMPKIN).
     // If this test fails, the derivation formula changed: every existing user's
     // L2 key — and therefore their funds — silently changes with it. Changing
     // the formula requires a v2 domain + migration, never an update to this pin.
     const sk = await deriveSkFromSignature(SIG);
-    expect(frToHex32(sk)).toBe('0x099eaf828e3d5232c2fc2ed5f2117b052c926d80a3ba4716933adf0c7c27e720');
-    expect(frToHex32(pkFromSk(sk).x)).toBe('0x2b0b924f522b0b6e583ea76d68d3b5a4c7347f39821ebea1c1249ea87e547f2f');
+    expect(frToHex32(sk)).toBe('0x191cd96a1f8d02132b0d56adef15995adda53fe26bcd9e74b463e9d5e93fb423');
+    expect(frToHex32(pkFromSk(sk).x)).toBe('0x149f8e093f52894ce377ba78f81c017ba25a2c88de1a893ecf6080461bfc11c9');
   });
 
   it('is deterministic for the same signature', async () => {
