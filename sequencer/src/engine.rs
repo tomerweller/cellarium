@@ -332,7 +332,16 @@ impl Engine {
                 );
             }
             Command::ConfirmBatch(batch_num, reply) => {
-                let _ = reply.send(self.confirm_batch(batch_num));
+                let result = self.confirm_batch(batch_num);
+                if let Err(e) = &result {
+                    // The batcher only asks to confirm after the chain landed
+                    // this batch's root: failing to persist it durably means
+                    // local state no longer matches the chain. Degrade
+                    // readiness and stop building on top (issue #13).
+                    tracing::error!(batch_num, %e, "durable confirmation failed; marking chain-desynced");
+                    self.chain_synced = false;
+                }
+                let _ = reply.send(result);
             }
             Command::FailBatch(batch_num, reason, reply) => {
                 let _ = reply.send(self.fail_batch(batch_num, &reason));
@@ -1308,11 +1317,13 @@ impl Engine {
             return Err(ApiError::Internal("replay root mismatch".into()));
         }
         let open_slots = witness.open_slots.clone();
-        self.state = work_state;
 
-        // Persist everything atomically.
+        // Persist everything atomically FROM work_state; the live in-memory
+        // tree advances only after the commit succeeds (issue #13) — a write
+        // or commit failure must not leave memory ahead of SQLite, and a
+        // confirmation retry must replay against the unadvanced tree.
         let tx = self.conn.unchecked_transaction()?;
-        for (idx, account) in self.state.accounts.leaves.iter() {
+        for (idx, account) in work_state.accounts.leaves.iter() {
             db::upsert_leaf(&tx, *idx, &account.pk_x, account.cash, account.coll, account.nonce)?;
         }
         for (slot, req) in open_slots.iter().zip(&opens) {
@@ -1404,6 +1415,7 @@ impl Engine {
         }
         db::batch_set_status(&tx, batch_num, "confirmed")?;
         tx.commit()?;
+        self.state = work_state;
         tracing::info!(batch_num, root = %fr_hex(&batch.new_root), "batch confirmed");
         Ok(())
     }
@@ -2290,6 +2302,37 @@ mod engine_tests {
         // DA blob is served for the confirmed batch and re-parses.
         let blob = e.get_da(1).unwrap();
         assert!(parse_blob(&blob).is_ok());
+    }
+
+    #[test]
+    fn confirm_write_failure_leaves_live_state_unadvanced() {
+        // Issue #13: a failed persist must not leave the in-memory tree
+        // ahead of SQLite, and a later retry must replay cleanly.
+        let mut e = engine(2, 4, 0);
+        let (alice, bob) = (kp(101), kp(202));
+        fund(&mut e, 0, &alice, 1_000_000);
+        fund(&mut e, 1, &bob, 500_000);
+        e.submit_tx(transfer(&alice, &bob, 100_000, 0)).unwrap();
+        let job = e.try_build_batch(250_000_000).unwrap().expect("build");
+        e.record_proof(job.batch_num, vec![1u8; 14_592], pis_for(&e, 1)).unwrap();
+        e.mark_submitting(job.batch_num).unwrap();
+        db::batch_set_submitted(&e.conn, job.batch_num, Some("txhash")).unwrap();
+
+        let hasher = Hasher::new();
+        let root_before = e.state.state_root(&hasher);
+
+        // Inject a mid-transaction write failure: the history table vanishes.
+        e.conn.execute_batch("ALTER TABLE history RENAME TO history_bak").unwrap();
+        assert!(e.confirm_batch(job.batch_num).is_err());
+        assert_eq!(e.state.state_root(&hasher), root_before, "memory advanced past a failed commit");
+        assert_eq!(e.confirmed_batch_num(), 0);
+        assert_eq!(db::inflight_batch(&e.conn).unwrap().unwrap().status, "submitted");
+
+        // Restore and retry: confirmation replays against the unadvanced tree.
+        e.conn.execute_batch("ALTER TABLE history_bak RENAME TO history").unwrap();
+        e.confirm_batch(job.batch_num).unwrap();
+        assert_eq!(e.confirmed_batch_num(), 1);
+        assert_eq!(e.state.accounts.get(0).unwrap().cash, 900_000);
     }
 
     #[test]
