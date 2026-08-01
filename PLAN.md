@@ -397,3 +397,12 @@ These amend the sections above and take precedence where they conflict.
   caveat, documented).
 - **Genesis state root** = P2([empty_root_d8, empty_root_d8]) — the position
   tree shares the account tree's node/empty conventions.
+
+### 6.4 M3/M4 note
+
+All remaining circuit work (close, default, liquidation, the open-time
+adequacy check, and the interest gadget) landed in ONE circuit revision at
+M3 — a second application of the 6.1.2 "one VK regeneration" decision. The
+M3 and M4 milestones then differ only in sequencer/e2e scope: M3 exercises
+close + maturity default; M4 exercises the margin watcher (set_price-driven
+liquidation) and the under-collateralized-open rejection.

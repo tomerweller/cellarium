@@ -13,38 +13,38 @@ use crate::repo_vectors;
 
 #[test]
 fn batch_repo_replays_and_pins_all_seven_public_inputs() {
-    let (pis, roots, deps, opens, txs) = repo_vectors::batch_r();
-    batch_repo::<2, 1, 2>(
-        pis[0], pis[1], pis[2], pis[3], pis[4], pis[5], pis[6], roots[0], roots[1], deps, opens,
-        txs,
+    let (pis, roots, deps, closes, liqs, opens, txs) = repo_vectors::batch_r();
+    batch_repo::<2, 1, 1, 1, 2>(
+        pis[0], pis[1], pis[2], pis[3], pis[4], pis[5], pis[6], roots[0], roots[1], deps, closes,
+        liqs, opens, txs,
     );
 }
 
 #[test(should_fail)]
 fn batch_repo_rejects_wrong_new_state_root() {
-    let (pis, roots, deps, opens, txs) = repo_vectors::batch_r();
-    batch_repo::<2, 1, 2>(
+    let (pis, roots, deps, closes, liqs, opens, txs) = repo_vectors::batch_r();
+    batch_repo::<2, 1, 1, 1, 2>(
         pis[0], pis[1] + 1, pis[2], pis[3], pis[4], pis[5], pis[6], roots[0], roots[1], deps,
-        opens, txs,
+        closes, liqs, opens, txs,
     );
 }
 
 #[test(should_fail)]
 fn batch_repo_rejects_wrong_root_opening() {
     // A lying prover cannot open the state root to different tree roots.
-    let (pis, roots, deps, opens, txs) = repo_vectors::batch_r();
-    batch_repo::<2, 1, 2>(
+    let (pis, roots, deps, closes, liqs, opens, txs) = repo_vectors::batch_r();
+    batch_repo::<2, 1, 1, 1, 2>(
         pis[0], pis[1], pis[2], pis[3], pis[4], pis[5], pis[6], roots[0] + 1, roots[1], deps,
-        opens, txs,
+        closes, liqs, opens, txs,
     );
 }
 
 #[test(should_fail)]
 fn batch_repo_rejects_wrong_da_commitment() {
-    let (pis, roots, deps, opens, txs) = repo_vectors::batch_r();
-    batch_repo::<2, 1, 2>(
+    let (pis, roots, deps, closes, liqs, opens, txs) = repo_vectors::batch_r();
+    batch_repo::<2, 1, 1, 1, 2>(
         pis[0], pis[1], pis[2], pis[3], pis[4] + 1, pis[5], pis[6], roots[0], roots[1], deps,
-        opens, txs,
+        closes, liqs, opens, txs,
     );
 }
 
@@ -53,31 +53,31 @@ fn batch_repo_rejects_wrong_da_commitment() {
 #[test(should_fail)]
 fn open_requires_both_signatures() {
     let (acct_root, pos_root, w) = repo_vectors::open_single_sig();
-    let _ = apply_open(acct_root, pos_root, 0, 0, 0, w);
+    let _ = apply_open(acct_root, pos_root, 0, 1700000100, 250000000, w);
 }
 
 #[test(should_fail)]
 fn open_rejects_occupied_slot() {
     let (acct_root, pos_root, w) = repo_vectors::open_occupied_slot();
-    let _ = apply_open(acct_root, pos_root, 0, 0, 0, w);
+    let _ = apply_open(acct_root, pos_root, 0, 1700000100, 250000000, w);
 }
 
 #[test(should_fail)]
 fn open_rejects_lender_overdraft() {
     let (acct_root, pos_root, w) = repo_vectors::open_lender_overdraft();
-    let _ = apply_open(acct_root, pos_root, 0, 0, 0, w);
+    let _ = apply_open(acct_root, pos_root, 0, 1700000100, 250000000, w);
 }
 
 #[test(should_fail)]
 fn open_rejects_borrower_coll_overdraft() {
     let (acct_root, pos_root, w) = repo_vectors::open_coll_overdraft();
-    let _ = apply_open(acct_root, pos_root, 0, 0, 0, w);
+    let _ = apply_open(acct_root, pos_root, 0, 1700000100, 250000000, w);
 }
 
 #[test(should_fail)]
 fn open_signature_binds_terms() {
     let (acct_root, pos_root, w) = repo_vectors::open_terms_not_signed();
-    let _ = apply_open(acct_root, pos_root, 0, 0, 0, w);
+    let _ = apply_open(acct_root, pos_root, 0, 1700000100, 250000000, w);
 }
 
 // --- Inactive entries are identities ----------------------------------------
@@ -85,7 +85,7 @@ fn open_signature_binds_terms() {
 #[test]
 fn inactive_open_moves_nothing() {
     let (acct_root, pos_root, w) = repo_vectors::open_inactive();
-    let (ar, pr, da) = apply_open(acct_root, pos_root, 42, 0, 0, w);
+    let (ar, pr, da) = apply_open(acct_root, pos_root, 42, 1700000100, 250000000, w);
     assert(ar == acct_root);
     assert(pr == pos_root);
     assert(da == 42);

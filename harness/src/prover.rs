@@ -104,6 +104,57 @@ pub fn to_repo_prover_toml(w: &RepoBatchWitness) -> String {
     let _ = writeln!(out, "old_acct_root = {}", fr_lit(&w.old_acct_root));
     let _ = writeln!(out, "old_pos_root = {}", fr_lit(&w.old_pos_root));
     emit_deposits(&mut out, &w.deposits);
+    for c in &w.closes {
+        let p = &c.position;
+        let _ = writeln!(out, "\n[[closes]]");
+        let _ = writeln!(out, "borrower_pk_x = {}", fr_lit(&p.borrower_pk_x));
+        let _ = writeln!(out, "borrower_pk_y = {}", fr_lit(&c.borrower_pk_y));
+        let _ = writeln!(out, "lender_pk_x = {}", fr_lit(&p.lender_pk_x));
+        let _ = writeln!(out, "cash = {}", u64_lit(p.cash));
+        let _ = writeln!(out, "coll = {}", u64_lit(p.coll));
+        let _ = writeln!(out, "rate_bps = {}", u64_lit(p.rate_bps as u64));
+        let _ = writeln!(out, "haircut_bps = {}", u64_lit(p.haircut_bps as u64));
+        let _ = writeln!(out, "open_ts = {}", u64_lit(p.open_ts));
+        let _ = writeln!(out, "maturity_ts = {}", u64_lit(p.maturity_ts));
+        let _ = writeln!(out, "pos_index = {}", u64_lit(c.pos_index as u64));
+        let _ = writeln!(out, "pos_old_leaf = {}", fr_lit(&c.pos_old_leaf));
+        let _ = writeln!(out, "pos_siblings = {}", siblings_lit(&c.pos_siblings));
+        let _ = writeln!(out, "borrower_index = {}", u64_lit(c.borrower_index as u64));
+        let _ = writeln!(out, "borrower_cash = {}", u64_lit(c.borrower_cash));
+        let _ = writeln!(out, "borrower_coll = {}", u64_lit(c.borrower_coll));
+        let _ = writeln!(out, "borrower_nonce = {}", u64_lit(c.borrower_nonce));
+        let _ = writeln!(out, "borrower_siblings = {}", siblings_lit(&c.borrower_siblings));
+        let _ = writeln!(out, "lender_index = {}", u64_lit(c.lender_index as u64));
+        let _ = writeln!(out, "lender_cash = {}", u64_lit(c.lender_cash));
+        let _ = writeln!(out, "lender_coll = {}", u64_lit(c.lender_coll));
+        let _ = writeln!(out, "lender_nonce = {}", u64_lit(c.lender_nonce));
+        let _ = writeln!(out, "lender_siblings = {}", siblings_lit(&c.lender_siblings));
+        let _ = writeln!(out, "interest = {}", u64_lit(c.interest));
+        let _ = writeln!(out, "is_active = {}", bool_lit(c.is_active));
+        sig_toml(&mut out, "closes.borrower_sig", &c.sig);
+    }
+    for l in &w.liqs {
+        let p = &l.position;
+        let _ = writeln!(out, "\n[[liqs]]");
+        let _ = writeln!(out, "borrower_pk_x = {}", fr_lit(&p.borrower_pk_x));
+        let _ = writeln!(out, "lender_pk_x = {}", fr_lit(&p.lender_pk_x));
+        let _ = writeln!(out, "cash = {}", u64_lit(p.cash));
+        let _ = writeln!(out, "coll = {}", u64_lit(p.coll));
+        let _ = writeln!(out, "rate_bps = {}", u64_lit(p.rate_bps as u64));
+        let _ = writeln!(out, "haircut_bps = {}", u64_lit(p.haircut_bps as u64));
+        let _ = writeln!(out, "open_ts = {}", u64_lit(p.open_ts));
+        let _ = writeln!(out, "maturity_ts = {}", u64_lit(p.maturity_ts));
+        let _ = writeln!(out, "pos_index = {}", u64_lit(l.pos_index as u64));
+        let _ = writeln!(out, "pos_old_leaf = {}", fr_lit(&l.pos_old_leaf));
+        let _ = writeln!(out, "pos_siblings = {}", siblings_lit(&l.pos_siblings));
+        let _ = writeln!(out, "lender_index = {}", u64_lit(l.lender_index as u64));
+        let _ = writeln!(out, "lender_cash = {}", u64_lit(l.lender_cash));
+        let _ = writeln!(out, "lender_coll = {}", u64_lit(l.lender_coll));
+        let _ = writeln!(out, "lender_nonce = {}", u64_lit(l.lender_nonce));
+        let _ = writeln!(out, "lender_siblings = {}", siblings_lit(&l.lender_siblings));
+        let _ = writeln!(out, "is_liquidation = {}", bool_lit(l.is_liquidation));
+        let _ = writeln!(out, "is_active = {}", bool_lit(l.is_active));
+    }
     for o in &w.opens {
         let _ = writeln!(out, "\n[[opens]]");
         let _ = writeln!(out, "borrower_pk_x = {}", fr_lit(&o.borrower_pk_x));

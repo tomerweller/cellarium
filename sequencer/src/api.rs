@@ -3,7 +3,7 @@
 //! hex (canonical); amounts = decimal strings; addresses = strkey.
 
 use crate::config::Config;
-use crate::engine::{ApiError, Command, WireAccept, WireIntent, WireTx};
+use crate::engine::{ApiError, Command, WireAccept, WireClose, WireIntent, WireTx};
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
@@ -152,7 +152,11 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/intent/{id}/accept",
-            post(post_accept).route_layer(middleware::from_fn_with_state(limiter, rate_limit)),
+            post(post_accept).route_layer(middleware::from_fn_with_state(limiter.clone(), rate_limit)),
+        )
+        .route(
+            "/close",
+            post(post_close).route_layer(middleware::from_fn_with_state(limiter, rate_limit)),
         )
         .route("/intents/{pk_x}", get(get_intents))
         .route("/positions/{pk_x}", get(get_positions))
@@ -192,6 +196,14 @@ async fn post_accept(
     Json(accept): Json<WireAccept>,
 ) -> Result<impl IntoResponse, ApiError> {
     let receipt = ask(&st.engine, |reply| Command::AcceptIntent(id, accept, reply)).await?;
+    Ok(Json(receipt))
+}
+
+async fn post_close(
+    State(st): State<AppState>,
+    Json(close): Json<WireClose>,
+) -> Result<impl IntoResponse, ApiError> {
+    let receipt = ask(&st.engine, |reply| Command::SubmitClose(close, reply)).await?;
     Ok(Json(receipt))
 }
 

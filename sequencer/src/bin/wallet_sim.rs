@@ -10,6 +10,7 @@
 //!   wallet-sim intent <initiator_sk> <role> <counterparty_sk> <cash> <coll> <rate_bps> <haircut_bps> <term_secs>
 //!     (role = borrower|lender for the INITIATOR; nonces fetched live)
 //!   wallet-sim accept <acceptor_sk> <intent_id>
+//!   wallet-sim close <borrower_sk> <pos_index>
 //!   wallet-sim positions <pk_x_hex>
 //!
 //! Env: SORIBIUM_URL (default http://127.0.0.1:8080), CONTRACT_ID, SEQ_KEY
@@ -225,6 +226,38 @@ fn main() {
                 &format!("/intent/{intent_id}/accept"),
                 &serde_json::json!({ "sig": sig_json(&sig) }),
             );
+        }
+        "close" => {
+            use harness::repo::Position;
+            use harness::settle::close_message;
+            let borrower = keypair(args[2].parse().unwrap());
+            let pos_index: u32 = args[3].parse().unwrap();
+            let listing = get_json(&format!("/positions/{}", to_hex(&borrower.pk_x())));
+            let pos = listing["positions"]
+                .as_array()
+                .and_then(|a| a.iter().find(|p| p["slot"].as_u64() == Some(pos_index as u64)))
+                .unwrap_or_else(|| panic!("position {pos_index} not found"))
+                .clone();
+            let position = Position {
+                borrower_pk_x: parse_hex(pos["borrower_pk_x"].as_str().unwrap()),
+                lender_pk_x: parse_hex(pos["lender_pk_x"].as_str().unwrap()),
+                cash: pos["cash"].as_str().unwrap().parse().unwrap(),
+                coll: pos["coll"].as_str().unwrap().parse().unwrap(),
+                rate_bps: pos["rate_bps"].as_u64().unwrap() as u32,
+                haircut_bps: pos["haircut_bps"].as_u64().unwrap() as u32,
+                open_ts: pos["open_ts"].as_u64().unwrap(),
+                maturity_ts: pos["maturity_ts"].as_u64().unwrap(),
+            };
+            let nonce = pending_nonce(&to_hex(&borrower.pk_x()));
+            let msg = close_message(&hasher, pos_index, &position, nonce);
+            let sig = sign(&hasher, &borrower, msg, &mut rand::thread_rng());
+            post_json("/close", &serde_json::json!({
+                "pos_index": pos_index,
+                "borrower_pk_x": to_hex(&borrower.pk_x()),
+                "borrower_pk_y": to_hex(&borrower.pk_y()),
+                "nonce": nonce,
+                "sig": sig_json(&sig),
+            }));
         }
         "positions" => {
             let v = get_json(&format!("/positions/{}", &args[2]));

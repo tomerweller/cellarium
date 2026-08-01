@@ -113,16 +113,21 @@ fn pad_or(active: Field, sig: Signature) -> Signature {
     }
 }
 
+/// Range-check helper for the adequacy comparison: values < 2^144.
+fn assert_u144(v: Field) {
+    let _: [u1; 144] = v.to_le_bits();
+}
+
 /// Apply one repo open against the running (account_root, pos_root, da_acc);
-/// returns the updated triple. `_batch_ts` and `_price` are bound as public
-/// inputs from M2 but only constrained from M3 (time) / M4 (margin) - see
-/// PLAN.md 6.1.2.
+/// returns the updated triple. Enforces maturity_ts > batch_ts (M3) and the
+/// open-time collateral adequacy at the batch price (M4, PLAN.md 6.1.1):
+///   coll * price * 10^4  >=  cash * (10^4 + haircut_bps) * 10^7
 pub fn apply_open(
     acct_root: Field,
     pos_root: Field,
     da_acc: Field,
-    _batch_ts: Field,
-    _price: Field,
+    batch_ts: Field,
+    price: Field,
     o: OpenWitness,
 ) -> (Field, Field, Field) {
     assert(o.is_active * (1 - o.is_active) == 0);
@@ -169,6 +174,15 @@ pub fn apply_open(
         assert(is_even_y(o.lender_pk_y));
         // Terms must be internally consistent even before M3 binds batch_ts.
         assert_u64(o.maturity_ts - 1 - o.open_ts); // maturity_ts > open_ts
+        // M3: cannot open a repo that is already past maturity.
+        assert_u64(o.maturity_ts - 1 - batch_ts); // maturity_ts > batch_ts
+        // M4: open-time collateral adequacy at the batch price. price is a
+        // u64-bounded public input (contract enforces < 2^64), so both sides
+        // fit 2^144 and the difference range check is sound.
+        assert_u64(price);
+        let coll_value = o.coll * price * 10000;
+        let required = o.cash * (10000 + o.haircut_bps) * 10000000;
+        assert_u144(coll_value - required); // coll_value >= required
     }
 
     // --- borrower: coll -= coll, cash += cash, nonce += 1 ---

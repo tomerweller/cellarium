@@ -45,3 +45,16 @@ export function openMessage(p: PositionTerms, borrowerNonce: bigint, lenderNonce
 export function stateRoot(accountRoot: Fr, positionRoot: Fr): Fr {
   return p2([accountRoot, positionRoot]);
 }
+
+/** The borrower-signed close message: binds slot, position leaf, and nonce. */
+export function closeMessage(posIndex: bigint, p: PositionTerms, borrowerNonce: bigint): Fr {
+  return p2([DOMAIN_CLOSE, posIndex, posLeaf(p), borrowerNonce]);
+}
+
+/** 10^4 * 360 * 86400 — bps scale x ACT/360 year in seconds. */
+export const INTEREST_DENOM = 311_040_000_000n;
+
+/** interest = floor(cash * rate_bps * elapsed / DENOM), mirroring the circuit. */
+export function interest(cash: bigint, rateBps: bigint, elapsedSecs: bigint): bigint {
+  return (cash * rateBps * elapsedSecs) / INTEREST_DENOM;
+}

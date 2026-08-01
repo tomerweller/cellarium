@@ -5,7 +5,10 @@
 #   M1: deposits XLM and tUST to two users, L2-transfers each asset,
 #       withdraws each asset (wrong-asset negative included);
 #   M2: repo open via the bilateral intent flow (post -> countersign ->
-#       batch -> on-chain state-root advance; positions visible both sides).
+#       batch -> on-chain state-root advance; positions visible both sides);
+#   M3: close before maturity with interest asserted to the stroop against
+#       the harness computation; a short-maturity repo expires and the
+#       maturity watcher auto-defaults it, crediting the lender's collateral.
 #
 # The docker-compose path (`just bootstrap && just up`) exercises the same
 # sequencer binary; this script uses the native process so it runs anywhere
@@ -177,6 +180,52 @@ SEQ_ROOT2=$(curl -s "$URL/status" | jget root)
 CHAIN_ROOT2=0x$(stellar contract invoke --id "$ROLLUP" --source "$IDENTITY" --network testnet --send=no -- root 2>/dev/null | tr -d '"')
 [ "$SEQ_ROOT2" = "$CHAIN_ROOT2" ] || fail "post-open root mismatch: seq $SEQ_ROOT2 vs chain $CHAIN_ROOT2"
 echo "    repo open confirmed; positions visible both sides; roots match"
+
+echo "==> repo close: repay with interest before maturity"
+# The M2 position sits at some slot with cash=300000 @430bps. bob closes it.
+SLOT=$(curl -s "$URL/positions/$BOB" | grep -o '"slot":[0-9]*' | head -1 | cut -d: -f2)
+OPEN_TS=$(curl -s "$URL/positions/$BOB" | grep -o '"open_ts":[0-9]*' | head -1 | cut -d: -f2)
+BOB_CASH_BEFORE=$(curl -s "$URL/account/$BOB" | jget cash)
+ALICE_CASH_BEFORE=$(curl -s "$URL/account/$ALICE" | jget cash)
+$SIM close 202 "$SLOT" >/dev/null
+close_landed() { ! curl -s "$URL/positions/$BOB" | grep -q "\"slot\":$SLOT"; }
+for i in $(seq 1 36); do close_landed && break; sleep 5; done
+close_landed || fail "close never confirmed"
+
+# Interest asserted to the stroop: elapsed = close batch_ts - open_ts, both
+# from the sequencer's own records (DA blob binds batch_ts).
+BN=$(curl -s "$URL/status" | jget batch_num)
+CLOSE_TS=$(curl -s "$URL/da/$BN" | grep -o '"batch_ts":[0-9]*' | head -1 | cut -d: -f2)
+ELAPSED=$((CLOSE_TS - OPEN_TS))
+INTEREST=$(cargo run -q -p harness -- interest 300000 430 "$ELAPSED")
+EXPECT_BOB=$((BOB_CASH_BEFORE - 300000 - INTEREST))
+EXPECT_ALICE=$((ALICE_CASH_BEFORE + 300000 + INTEREST))
+BOB_CASH_AFTER=$(curl -s "$URL/account/$BOB" | jget cash)
+ALICE_CASH_AFTER=$(curl -s "$URL/account/$ALICE" | jget cash)
+[ "$BOB_CASH_AFTER" = "$EXPECT_BOB" ] || fail "borrower repay wrong: $BOB_CASH_AFTER != $EXPECT_BOB (interest $INTEREST over ${ELAPSED}s)"
+[ "$ALICE_CASH_AFTER" = "$EXPECT_ALICE" ] || fail "lender receipt wrong: $ALICE_CASH_AFTER != $EXPECT_ALICE"
+# Collateral returned to the borrower: 700000 + 900000 = 1600000.
+[ "$(curl -s "$URL/account/$BOB" | jget coll)" = "1600000" ] || fail "borrower coll not returned"
+echo "    close repaid 300000 + $INTEREST interest (${ELAPSED}s elapsed), coll returned"
+
+echo "==> repo default: maturity watcher"
+# A 45s-maturity repo that nobody closes: the watcher must auto-default it
+# and credit the LENDER's collateral account.
+ALICE_COLL_BEFORE=$(curl -s "$URL/account/$ALICE" | jget coll)
+INTENT2=$($SIM intent 202 borrower 101 100000 400000 500 300 45)
+INTENT2_ID=$(echo "$INTENT2" | jget id)
+$SIM accept 101 "$INTENT2_ID" >/dev/null
+open2_landed() { curl -s "$URL/positions/$BOB" | grep -q '"cash":"100000"'; }
+for i in $(seq 1 36); do open2_landed && break; sleep 5; done
+open2_landed || fail "short repo never opened"
+
+default_landed() { ! curl -s "$URL/positions/$BOB" | grep -q '"cash":"100000"'; }
+for i in $(seq 1 36); do default_landed && break; sleep 5; done
+default_landed || fail "expired repo never auto-defaulted"
+ALICE_COLL_AFTER=$(curl -s "$URL/account/$ALICE" | jget coll)
+[ "$ALICE_COLL_AFTER" = "$((ALICE_COLL_BEFORE + 400000))" ] || fail "lender collateral not credited on default: $ALICE_COLL_AFTER"
+# Borrower keeps the borrowed cash (no clawback).
+echo "    auto-default credited lender 400000 coll; borrower kept the cash"
 
 # Anti-replay: resubmitting alice's consumed nonce 0 must NOT re-execute —
 # the (sender,nonce) idempotency short-circuit returns the original included

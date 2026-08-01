@@ -35,6 +35,26 @@
   "empty_state_root": "0x1849b85f3c693693e732dfc4577217acc18295193bede09ce8b97ad910310972",
   "hash2_1_2": "0x038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383",
   "hash4_1_2_3_4": "0x130bf204a32cac1f0ace56c78b731aa3809f06df2731ebcf6b3464a15788b1b9",
+  "interest_vectors": [
+    {
+      "cash": "1000000",
+      "elapsed": 0,
+      "interest": "0",
+      "rate_bps": 430
+    },
+    {
+      "cash": "100000000000000",
+      "elapsed": 86400,
+      "interest": "11944444444",
+      "rate_bps": 430
+    },
+    {
+      "cash": "1000000000",
+      "elapsed": 31536000,
+      "interest": "126736111",
+      "rate_bps": 1250
+    }
+  ],
   "leaf_1234_100_40_0": "0x2cadc331fd61be1dc52aa0bf0d748b484e0ad61410836487abc8cc50691db5fd",
   "pad": {
     "pk_x": "0x0e602b9dd6a3e8d039a17f069add3f9c2a187a8f629a1de60a33a8067b9b2842",
@@ -47,6 +67,7 @@
   "repo_demo_position": {
     "borrower_pk_x": "0x13d84dfee2bd99f26530c590cd8c011979328f1fa149234b19fea91510f94ebb",
     "cash": "1000000",
+    "close_msg_slot0_n1": "0x157a6da36c40b36d3153706310bc233e4a1235f231b113c0a454a8251869615e",
     "coll": "3000000",
     "haircut_bps": 200,
     "lender_pk_x": "0x1f2cbd75183a0cced1f2b4d1121a647b3b421baed26e463b2565b7972ae1a83c",

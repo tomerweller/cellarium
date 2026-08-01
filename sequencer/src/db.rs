@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub type DbResult<T> = Result<T, rusqlite::Error>;
 
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 pub fn open(path: &std::path::Path) -> DbResult<Connection> {
     let conn = Connection::open(path)?;
@@ -137,6 +137,29 @@ fn migrate(conn: &Connection) -> DbResult<()> {
           reject_reason TEXT,
           received_at INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS closes (
+          id            INTEGER PRIMARY KEY AUTOINCREMENT,
+          pos_index     INTEGER NOT NULL,
+          borrower_pk_x TEXT NOT NULL,
+          borrower_pk_y TEXT NOT NULL,
+          borrower_nonce INTEGER NOT NULL,
+          sig_r_x  TEXT NOT NULL,
+          sig_r_y  TEXT NOT NULL,
+          sig_s_lo TEXT NOT NULL,
+          sig_s_hi TEXT NOT NULL,
+          status      TEXT NOT NULL DEFAULT 'pending',
+          batch_num   INTEGER,
+          reject_reason TEXT,
+          received_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS liqs (
+          pos_index     INTEGER PRIMARY KEY,
+          is_liquidation INTEGER NOT NULL,
+          status      TEXT NOT NULL DEFAULT 'pending',
+          batch_num   INTEGER,
+          reject_reason TEXT,
+          created_at  INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS batches (
           batch_num     INTEGER PRIMARY KEY,
           old_root      TEXT NOT NULL,
@@ -166,7 +189,7 @@ fn migrate(conn: &Connection) -> DbResult<()> {
           ts INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS history_pk ON history(pk_x, id DESC);
-        PRAGMA user_version = 3;
+        PRAGMA user_version = 4;
         COMMIT;
         "#,
     )
@@ -990,4 +1013,149 @@ pub fn load_positions(conn: &Connection) -> DbResult<Vec<PositionRow>> {
         })
     })?;
     rows.collect()
+}
+
+// ---------- closes / liqs (M3) ----------
+
+#[derive(Debug, Clone)]
+pub struct CloseRow {
+    pub id: i64,
+    pub pos_index: u32,
+    pub borrower_pk_x: Fr,
+    pub borrower_pk_y: Fr,
+    pub borrower_nonce: u64,
+    pub sig: [Fr; 4],
+}
+
+pub fn insert_close(conn: &Connection, row: &CloseRow) -> DbResult<i64> {
+    conn.execute(
+        "INSERT INTO closes(pos_index, borrower_pk_x, borrower_pk_y, borrower_nonce,
+                            sig_r_x, sig_r_y, sig_s_lo, sig_s_hi, received_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+        params![
+            row.pos_index as i64,
+            fr_hex(&row.borrower_pk_x),
+            fr_hex(&row.borrower_pk_y),
+            row.borrower_nonce as i64,
+            fr_hex(&row.sig[0]), fr_hex(&row.sig[1]), fr_hex(&row.sig[2]), fr_hex(&row.sig[3]),
+            now(),
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn closes_pending(conn: &Connection, limit: usize) -> DbResult<Vec<CloseRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, pos_index, borrower_pk_x, borrower_pk_y, borrower_nonce,
+                sig_r_x, sig_r_y, sig_s_lo, sig_s_hi
+         FROM closes WHERE status = 'pending' ORDER BY id LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit as i64], |r| {
+        let get_fr = |i: usize| -> rusqlite::Result<Fr> {
+            let s: String = r.get(i)?;
+            Ok(parse_fr(&s).expect("db fr corrupt"))
+        };
+        Ok(CloseRow {
+            id: r.get(0)?,
+            pos_index: r.get::<_, i64>(1)? as u32,
+            borrower_pk_x: get_fr(2)?,
+            borrower_pk_y: get_fr(3)?,
+            borrower_nonce: r.get::<_, i64>(4)? as u64,
+            sig: [get_fr(5)?, get_fr(6)?, get_fr(7)?, get_fr(8)?],
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn closes_pending_for(conn: &Connection, pk_x: &Fr) -> DbResult<u64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM closes WHERE status IN ('pending','batching') AND borrower_pk_x = ?1",
+        [fr_hex(pk_x)],
+        |r| r.get::<_, i64>(0).map(|v| v as u64),
+    )
+}
+
+pub fn closes_count_pending(conn: &Connection) -> DbResult<u64> {
+    conn.query_row("SELECT COUNT(*) FROM closes WHERE status = 'pending'", [], |r| {
+        r.get::<_, i64>(0).map(|v| v as u64)
+    })
+}
+
+pub fn closes_oldest_pending_age(conn: &Connection) -> DbResult<Option<i64>> {
+    conn.query_row("SELECT MIN(received_at) FROM closes WHERE status = 'pending'", [], |r| {
+        r.get::<_, Option<i64>>(0)
+    })
+    .map(|min| min.map(|m| now() - m))
+}
+
+pub fn closes_set_status(
+    conn: &Connection,
+    ids: &[i64],
+    status: &str,
+    batch_num: Option<u64>,
+    reason: Option<&str>,
+) -> DbResult<()> {
+    for id in ids {
+        conn.execute(
+            "UPDATE closes SET status = ?1, batch_num = ?2, reject_reason = ?3 WHERE id = ?4",
+            params![status, batch_num.map(|b| b as i64), reason, id],
+        )?;
+    }
+    Ok(())
+}
+
+/// Enqueue a watcher-detected default/liquidation; idempotent per slot.
+pub fn insert_liq(conn: &Connection, pos_index: u32, is_liquidation: bool) -> DbResult<bool> {
+    let n = conn.execute(
+        "INSERT OR IGNORE INTO liqs(pos_index, is_liquidation, created_at) VALUES (?1,?2,?3)",
+        params![pos_index as i64, is_liquidation as i64, now()],
+    )?;
+    Ok(n > 0)
+}
+
+#[derive(Debug, Clone)]
+pub struct LiqRow {
+    pub pos_index: u32,
+    pub is_liquidation: bool,
+}
+
+pub fn liqs_pending(conn: &Connection, limit: usize) -> DbResult<Vec<LiqRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT pos_index, is_liquidation FROM liqs WHERE status = 'pending' ORDER BY pos_index LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit as i64], |r| {
+        Ok(LiqRow {
+            pos_index: r.get::<_, i64>(0)? as u32,
+            is_liquidation: r.get::<_, i64>(1)? != 0,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn liqs_count_pending(conn: &Connection) -> DbResult<u64> {
+    conn.query_row("SELECT COUNT(*) FROM liqs WHERE status = 'pending'", [], |r| {
+        r.get::<_, i64>(0).map(|v| v as u64)
+    })
+}
+
+pub fn liqs_set_status(
+    conn: &Connection,
+    slots: &[u32],
+    status: &str,
+    batch_num: Option<u64>,
+    reason: Option<&str>,
+) -> DbResult<()> {
+    for slot in slots {
+        conn.execute(
+            "UPDATE liqs SET status = ?1, batch_num = ?2, reject_reason = ?3 WHERE pos_index = ?4",
+            params![status, batch_num.map(|b| b as i64), reason, *slot as i64],
+        )?;
+    }
+    Ok(())
+}
+
+/// Drop a rejected/settled liq row so a future breach can re-enqueue the slot.
+pub fn delete_liq(conn: &Connection, pos_index: u32) -> DbResult<()> {
+    conn.execute("DELETE FROM liqs WHERE pos_index = ?1", [pos_index as i64])?;
+    Ok(())
 }

@@ -1,6 +1,7 @@
 pub mod batch;
 pub mod keys;
 pub mod repo;
+pub mod settle;
 pub mod l1;
 pub mod noir_repo_vectors;
 pub mod noir_vectors;

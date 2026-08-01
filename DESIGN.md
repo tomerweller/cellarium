@@ -82,6 +82,46 @@ Slot allocation is find-first-free (prover-supplied index; the circuit proves
 the old leaf is 0 under the RUNNING position root, which structurally
 prevents in-batch slot collisions). Closing zeroes the leaf.
 
+### Repo close / default / liquidation (M3-M4)
+
+Close (repay) is borrower-signed; the message binds the slot, the position
+leaf (hence every term), and the borrower nonce:
+
+```
+close_msg = Poseidon2([DOMAIN_CLOSE, pos_index, pos_leaf, borrower_nonce])
+```
+
+Requires `batch_ts <= maturity_ts`. Interest is annualized ACT/360 on
+seconds, floor division constrained in-circuit by product + remainder range
+checks (settle.nr; the harness mirrors it in u128 and interest unit vectors
+are pinned in circuit + wallet suites):
+
+```
+interest = floor(cash * rate_bps * (batch_ts - open_ts) / (10^4 * 360 * 86400))
+```
+
+Effects: borrower.cash -= cash+interest (nonce +1), lender.cash +=
+cash+interest (no signature, nonce unchanged), borrower.coll += coll,
+position zeroed.
+
+Default / liquidation is PERMISSIONLESS (no signature — validity comes solely
+from the condition holding at the bound batch_ts/price; the sequencer's
+watcher enqueues them):
+
+- default: `batch_ts > maturity_ts`
+- liquidation: margin breach at half the initial haircut, division-free:
+  `coll * price * 2*10^4 < cash * (2*10^4 + haircut_bps) * 10^7`
+
+Effects: lender.coll += coll (title transfer), borrower keeps the cash,
+position zeroed, no nonces move.
+
+Open additionally enforces (from the same circuit revision):
+`maturity_ts > batch_ts` and the open-time adequacy
+`coll * price * 10^4 >= cash * (10^4 + haircut_bps) * 10^7`.
+
+Batch application order: deposits -> closes -> defaults/liquidations ->
+opens -> payments.
+
 ### Repo open (M2)
 
 Bilateral: both parties sign
@@ -138,14 +178,15 @@ Schnorr over Grumpkin (hand-rolled; std::schnorr no longer exists):
   batch slots. Active deposits/transfers **blacklist** `PAD_PK_X` (secret is
   public — crediting it would make funds drainable by anyone).
 
-## Batch circuit public interface (M2: batch_repo, D=4 opens O=2 payments T=4)
+## Batch circuit public interface (batch_repo: D=4 C=2 L=2 O=2 T=4)
 
 ```
 main(old_state_root: pub, new_state_root: pub,
      deposit_hash: pub, withdraw_hash: pub, da_commitment: pub,
      batch_ts: pub, price: pub,
      old_acct_root, old_pos_root,           // private openings of state_root
-     deposits: [DepositWitness; D], opens: [OpenWitness; O], txs: [TxWitness; T])
+     deposits: [DepositWitness; D], closes: [CloseWitness; C],
+     liqs: [LiqWitness; L], opens: [OpenWitness; O], txs: [TxWitness; T])
 ```
 
 Exactly 7 public inputs (224-byte PI blob):
@@ -167,8 +208,10 @@ Exactly 7 public inputs (224-byte PI blob):
   `Poseidon2([address_to_field(dest), asset, amount])` entries from the
   envelope.
 - `da_commitment` — fold over each **active** off-chain-originated op in
-  application order: repo opens contribute `P2([open_msg, pos_index])`
-  (binding the slot), payments contribute their signing message:
+  application order: closes contribute `close_msg`, defaults/liquidations
+  contribute `P2([pos_index, is_liquidation])`, repo opens contribute
+  `P2([open_msg, pos_index])` (binding the slot), payments contribute their
+  signing message:
   `acc' = Poseidon2([DOMAIN_DA, acc, rec])` (3-input), `acc₀ = 0`. Deposits
   stay out of the fold — their data is on-chain in the queues and pinned by
   `deposit_hash`. Verifiers fetch the blob from `GET /da/:batch_num` and

@@ -23,11 +23,22 @@ fn main() {
             std::fs::write(path, harness::noir_vectors::emit()).expect("write tx_vectors.nr");
             println!("wrote {path}");
         }
-        // Witness vectors for the circuit repo_test.nr suite (M2).
+        // Witness vectors for the circuit repo_test.nr + settle_test.nr suites.
         "noir-repo-vectors" => {
             let path = "circuits/lib/src/repo_vectors.nr";
             std::fs::write(path, harness::noir_repo_vectors::emit()).expect("write repo_vectors.nr");
             println!("wrote {path}");
+            let path = "circuits/lib/src/settle_vectors.nr";
+            std::fs::write(path, harness::noir_repo_vectors::emit_settle())
+                .expect("write settle_vectors.nr");
+            println!("wrote {path}");
+        }
+        // Interest helper for e2e assertions: interest <cash> <rate_bps> <elapsed>.
+        "interest" => {
+            let cash: u64 = std::env::args().nth(2).unwrap().parse().unwrap();
+            let rate: u32 = std::env::args().nth(3).unwrap().parse().unwrap();
+            let elapsed: u64 = std::env::args().nth(4).unwrap().parse().unwrap();
+            println!("{}", harness::settle::interest(cash, rate, elapsed));
         }
         // Deterministic repo demo batch -> Prover.toml -> bb -> fixtures/batch_repo.
         "demo-repo-batch" => demo_repo_batch(),
@@ -257,7 +268,16 @@ fn demo_repo_batch() {
         make_signed_tx(&hasher, &bob, wd_field, Asset::Coll, 100_000, 1, true, &mut rng),
     ];
     let witness = build_repo_batch(
-        &hasher, &mut state, 4, 2, 4, &deposits, &[open], &txs, BATCH_TS, PRICE,
+        &hasher,
+        &mut state,
+        (4, 2, 2, 2, 4),
+        &deposits,
+        &[],
+        &[],
+        &[open],
+        &txs,
+        BATCH_TS,
+        PRICE,
     )
     .expect("demo repo batch must build");
 
@@ -438,6 +458,7 @@ fn vectors_json() {
     };
     let demo_pos_leaf = harness::repo::pos_leaf(&hasher, &demo_pos);
     let demo_open_msg = harness::repo::open_message(&hasher, &demo_pos, 0, 0);
+    let demo_close_msg = harness::settle::close_message(&hasher, 0, &demo_pos, 1);
     let empty_state_root = harness::repo::L2State::new().state_root(&hasher);
 
     // The demo scenario shared with fixtures/batch_n4 (meta.json).
@@ -484,7 +505,13 @@ fn vectors_json() {
             "open_ts": 1700000000u64, "maturity_ts": 1700086400u64,
             "pos_leaf": to_hex(&demo_pos_leaf),
             "open_msg_n0_n0": to_hex(&demo_open_msg),
+            "close_msg_slot0_n1": to_hex(&demo_close_msg),
         },
+        "interest_vectors": [
+            { "cash": "1000000", "rate_bps": 430, "elapsed": 0, "interest": harness::settle::interest(1_000_000, 430, 0).to_string() },
+            { "cash": "100000000000000", "rate_bps": 430, "elapsed": 86400, "interest": harness::settle::interest(100_000_000_000_000, 430, 86_400).to_string() },
+            { "cash": "1000000000", "rate_bps": 1250, "elapsed": 31536000, "interest": harness::settle::interest(1_000_000_000, 1250, 31_536_000).to_string() },
+        ],
         "pad": {
             "pk_x": to_hex(&pad_kp.pk_x()),
             "pk_y": to_hex(&pad_kp.pk_y()),

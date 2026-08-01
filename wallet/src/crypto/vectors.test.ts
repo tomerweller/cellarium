@@ -14,7 +14,7 @@ import { Fr, frToHex32, hexToFr, N_GRUMPKIN, randScalar } from './fields';
 import { pkFromSk } from './grumpkin';
 import { balHash, computeRoot, leafValue, verifyPath } from './merkle';
 import { p2 } from './poseidon2';
-import { openMessage, posLeaf, stateRoot, PositionTerms } from './repo';
+import { closeMessage, interest, openMessage, posLeaf, stateRoot, PositionTerms } from './repo';
 import { daFold, depFold, sign, txMessage, verify, wdFold } from './schnorr';
 
 const PK7_X = hexToFr(vectors.pad.pk_x);
@@ -183,5 +183,29 @@ describe('repo position hashing vs pinned vectors', () => {
   });
   it('empty combined state root matches the harness', () => {
     expect(frToHex32(stateRoot(EMPTY_ROOT_D8, EMPTY_ROOT_D8))).toBe(vectors.empty_state_root);
+  });
+});
+
+describe('repo settlement vs pinned vectors', () => {
+  const rp = vectors.repo_demo_position;
+  const terms: PositionTerms = {
+    borrowerPkX: hexToFr(rp.borrower_pk_x),
+    lenderPkX: hexToFr(rp.lender_pk_x),
+    cash: BigInt(rp.cash),
+    coll: BigInt(rp.coll),
+    rateBps: BigInt(rp.rate_bps),
+    haircutBps: BigInt(rp.haircut_bps),
+    openTs: BigInt(rp.open_ts),
+    maturityTs: BigInt(rp.maturity_ts),
+  };
+  it('close message (slot 0, nonce 1) matches the harness', () => {
+    expect(frToHex32(closeMessage(0n, terms, 1n))).toBe(rp.close_msg_slot0_n1);
+  });
+  it('interest vectors match the harness to the stroop', () => {
+    for (const v of vectors.interest_vectors) {
+      expect(interest(BigInt(v.cash), BigInt(v.rate_bps), BigInt(v.elapsed)).toString()).toBe(
+        v.interest,
+      );
+    }
   });
 });

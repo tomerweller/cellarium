@@ -7,6 +7,10 @@ use crate::batch::{
     build_batch, BatchWitness, BuildError, DepositEntry, DepositRequest, SignedTx, TxEntry,
 };
 use crate::keys::{pad_signature, pk_from_coords, verify, Signature};
+use crate::settle::{
+    apply_close, apply_liq, pad_close, pad_liq, CloseEntry, CloseRequest, LiqEntry, LiqRequest,
+    SettleError,
+};
 use crate::poseidon::{fr_from_u64, Fr, Hasher, FR_ZERO};
 use crate::tree::{Account, Tree, DEPTH, N_LEAVES};
 use serde::{Deserialize, Serialize};
@@ -204,6 +208,7 @@ pub enum OpenError {
     BadSignature { open_index: usize, role: &'static str },
     ZeroAmount { open_index: usize },
     BadTerms { open_index: usize },
+    Undercollateralized { open_index: usize },
     PositionsFull { open_index: usize },
     ReservedPaddingPk { open_index: usize },
 }
@@ -219,6 +224,10 @@ impl std::error::Error for OpenError {}
 pub enum RepoBuildError {
     Payments(BuildError),
     Open(OpenError),
+    /// From the closes loop (index = position in the closes slice).
+    Close(SettleError),
+    /// From the defaults/liquidations loop (index = position in the liqs slice).
+    Liq(SettleError),
 }
 
 impl std::fmt::Display for RepoBuildError {
@@ -226,6 +235,8 @@ impl std::fmt::Display for RepoBuildError {
         match self {
             RepoBuildError::Payments(e) => write!(f, "{e}"),
             RepoBuildError::Open(e) => write!(f, "{e}"),
+            RepoBuildError::Close(e) => write!(f, "{e}"),
+            RepoBuildError::Liq(e) => write!(f, "{e}"),
         }
     }
 }
@@ -243,6 +254,8 @@ pub struct RepoBatchWitness {
     pub batch_ts: u64,
     pub price: u64,
     pub deposits: Vec<DepositEntry>,
+    pub closes: Vec<CloseEntry>,
+    pub liqs: Vec<LiqEntry>,
     pub opens: Vec<OpenEntry>,
     pub txs: Vec<TxEntry>,
     /// Slot index assigned to each ACTIVE open, in order (for the DA blob /
@@ -275,6 +288,8 @@ fn apply_open(
     state: &mut L2State,
     i: usize,
     req: &OpenRequest,
+    batch_ts: u64,
+    price: u64,
     da_acc: &mut Fr,
 ) -> Result<OpenEntry, OpenError> {
     let p = &req.position;
@@ -283,6 +298,16 @@ fn apply_open(
     }
     if p.maturity_ts <= p.open_ts {
         return Err(OpenError::BadTerms { open_index: i });
+    }
+    // M3: cannot open past maturity; M4: open-time collateral adequacy
+    // (coll * price * 1e4 >= cash * (1e4 + haircut) * 1e7, PLAN.md 6.1.1).
+    if p.maturity_ts <= batch_ts {
+        return Err(OpenError::BadTerms { open_index: i });
+    }
+    let coll_value = (p.coll as u128) * (price as u128) * 10_000;
+    let required = (p.cash as u128) * (10_000 + p.haircut_bps as u128) * 10_000_000;
+    if coll_value < required {
+        return Err(OpenError::Undercollateralized { open_index: i });
     }
     if p.borrower_pk_x == p.lender_pk_x {
         return Err(OpenError::SameParty { open_index: i });
@@ -456,16 +481,17 @@ fn pad_open(hasher: &Hasher, state: &L2State) -> OpenEntry {
 pub fn build_repo_batch(
     hasher: &Hasher,
     state: &mut L2State,
-    d_slots: usize,
-    o_slots: usize,
-    t_slots: usize,
+    slots: (usize, usize, usize, usize, usize), // (D, C, L, O, T)
     deposits: &[DepositRequest],
+    closes: &[CloseRequest],
+    liqs: &[LiqRequest],
     opens: &[OpenRequest],
     txs: &[SignedTx],
     batch_ts: u64,
     price: u64,
 ) -> Result<RepoBatchWitness, RepoBuildError> {
-    if opens.len() > o_slots {
+    let (d_slots, c_slots, l_slots, o_slots, t_slots) = slots;
+    if opens.len() > o_slots || closes.len() > c_slots || liqs.len() > l_slots {
         return Err(RepoBuildError::Payments(BuildError::TooManyEntries));
     }
     let old_acct_root = state.accounts.root(hasher);
@@ -484,12 +510,34 @@ pub fn build_repo_batch(
     )
     .map_err(RepoBuildError::Payments)?;
 
-    // Opens (against both trees), accumulating the DA fold from zero.
+    // Closes, then defaults/liquidations (freed slots become reusable by
+    // opens), accumulating the DA fold from zero.
     let mut da_acc = FR_ZERO;
+    let mut close_entries = Vec::new();
+    for (i, req) in closes.iter().enumerate() {
+        let entry = apply_close(hasher, state, i, req, batch_ts, &mut da_acc)
+            .map_err(RepoBuildError::Close)?;
+        close_entries.push(entry);
+    }
+    while close_entries.len() < c_slots {
+        close_entries.push(pad_close(hasher, state));
+    }
+    let mut liq_entries = Vec::new();
+    for (i, req) in liqs.iter().enumerate() {
+        let entry = apply_liq(hasher, state, i, req, batch_ts, price, &mut da_acc)
+            .map_err(RepoBuildError::Liq)?;
+        liq_entries.push(entry);
+    }
+    while liq_entries.len() < l_slots {
+        liq_entries.push(pad_liq(hasher, state));
+    }
+
+    // Opens (against both trees).
     let mut open_entries = Vec::new();
     let mut open_slots = Vec::new();
     for (i, req) in opens.iter().enumerate() {
-        let entry = apply_open(hasher, state, i, req, &mut da_acc).map_err(RepoBuildError::Open)?;
+        let entry = apply_open(hasher, state, i, req, batch_ts, price, &mut da_acc)
+            .map_err(RepoBuildError::Open)?;
         open_slots.push(entry.pos_index);
         open_entries.push(entry);
     }
@@ -528,6 +576,8 @@ pub fn build_repo_batch(
         batch_ts,
         price,
         deposits: dep_witness.deposits,
+        closes: close_entries,
+        liqs: liq_entries,
         opens: open_entries,
         txs: pay_witness.txs,
         open_slots,

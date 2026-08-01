@@ -22,6 +22,8 @@ pub struct Config {
     /// Circuit package to prove (fixed shape D=4/O=2/T=4 for batch_repo).
     pub circuit_pkg: String,
     pub deposit_slots: usize,
+    pub close_slots: usize,
+    pub liq_slots: usize,
     pub open_slots: usize,
     pub tx_slots: usize,
     /// Mock price oracle contract (read every build; PLAN.md 1.5/1.6).
@@ -39,10 +41,11 @@ fn var_or(name: &str, default: &str) -> String {
 impl Config {
     pub fn from_env() -> Result<Config, String> {
         let circuit_pkg = var_or("CIRCUIT_PKG", "batch_repo");
-        let (deposit_slots, open_slots, tx_slots) = match circuit_pkg.as_str() {
-            "batch_repo" => (4, 2, 4),
-            other => return Err(format!("unknown CIRCUIT_PKG {other}")),
-        };
+        let (deposit_slots, close_slots, liq_slots, open_slots, tx_slots) =
+            match circuit_pkg.as_str() {
+                "batch_repo" => (4, 2, 2, 2, 4),
+                other => return Err(format!("unknown CIRCUIT_PKG {other}")),
+            };
         Ok(Config {
             rpc_url: var_or("RPC_URL", "https://soroban-testnet.stellar.org"),
             network_passphrase: var_or("NETWORK_PASSPHRASE", "Test SDF Network ; September 2015"),
@@ -57,6 +60,8 @@ impl Config {
             tick_secs: var_or("TICK_SECS", "5").parse().map_err(|_| "bad TICK_SECS")?,
             circuit_pkg,
             deposit_slots,
+            close_slots,
+            liq_slots,
             open_slots,
             tx_slots,
             oracle_id: var("ORACLE_ID")?,
