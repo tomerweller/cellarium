@@ -347,7 +347,7 @@ pub fn insert_mempool(
 
 /// The full row at (sender, nonce), if any — the caller compares payloads so
 /// a DIFFERENT tx reusing the slot is rejected instead of silently answered
-/// with the original receipt (issue #1 L11).
+/// with the original receipt (issue #1 L11 / #45).
 pub fn mempool_find(conn: &Connection, from_pk_x: &Fr, nonce: u64) -> DbResult<Option<MempoolRow>> {
     conn.query_row(
         &format!("SELECT {MEMPOOL_COLS} FROM mempool WHERE from_pk_x = ?1 AND nonce = ?2"),

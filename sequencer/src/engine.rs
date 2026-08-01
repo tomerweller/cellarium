@@ -176,9 +176,12 @@ pub enum ApiError {
     #[error("NONCE_MISMATCH: expected {expected}")]
     NonceMismatch { expected: u64 },
     /// A DIFFERENT tx already occupies this (sender, nonce) slot (issue #1
-    /// L11) — resubmitting the identical tx returns the original receipt.
+    /// L11 / issue #45) — resubmitting the identical tx returns the
+    /// original receipt.
     #[error("DUPLICATE_NONCE: a different tx is already pending at this nonce")]
     DuplicateNonce,
+    #[error("QUEUE_CONFLICT: {0}")]
+    QueueConflict(String),
     #[error("INSUFFICIENT_BALANCE: available {available}")]
     InsufficientBalance { available: u64 },
     #[error("RECIPIENT_UNKNOWN")]
@@ -470,7 +473,7 @@ impl Engine {
 
         // Idempotent resubmission: the IDENTICAL tx at (sender, nonce)
         // returns the original receipt; a different payload at an occupied
-        // slot is an error, not a silent success (issue #1 L11).
+        // slot is an error, not a silent success (issue #1 L11 / #45).
         if let Some(row) = db::mempool_find(&self.conn, &from_pk_x, tx.nonce)? {
             let same_sig = [&row.sig_r_x, &row.sig_r_y, &row.sig_s_lo, &row.sig_s_hi]
                 .iter()
@@ -485,6 +488,7 @@ impl Engine {
             }
             return Err(ApiError::DuplicateNonce);
         }
+
 
         let (to_field, withdraw_dest) = if tx.is_withdraw {
             // Full strkey validation (checksum, not just shape): a typo'd
@@ -678,6 +682,15 @@ impl Engine {
         {
             return Err(ApiError::AccountUnknown);
         }
+        // Cross-class ordering (issue #16): opens execute before payments in
+        // a batch, so an intent signed while the initiator has pending
+        // payments carries a nonce the open could never satisfy. Fail fast
+        // here; the acceptor's queue is re-checked at accept time.
+        if !db::mempool_pending_for(&self.conn, &signer_x)?.is_empty() {
+            return Err(ApiError::QueueConflict(
+                "pending transfers must be included before an intent can be signed".into(),
+            ));
+        }
         let (lo, hi) = sig.s_limbs();
         let id = db::insert_intent(
             &self.conn,
@@ -742,6 +755,18 @@ impl Engine {
         let pk = pk_from_coords(&acceptor_x, &acceptor_y).ok_or(ApiError::BadSignature)?;
         if !verify(&hasher, &pk, msg, &acc_sig) {
             return Err(ApiError::BadSignature);
+        }
+
+        // Cross-class ordering (issue #16): the open executes before any
+        // payment in the batch, so pending payments from EITHER party mean
+        // the open's signed nonces cannot line up with batch execution
+        // order. Refuse the countersign instead of queueing a doomed open.
+        if !db::mempool_pending_for(&self.conn, &position.borrower_pk_x)?.is_empty()
+            || !db::mempool_pending_for(&self.conn, &position.lender_pk_x)?.is_empty()
+        {
+            return Err(ApiError::QueueConflict(
+                "pending transfers must be included before this intent can be accepted".into(),
+            ));
         }
 
         // Reassemble both signatures in role order.
@@ -873,6 +898,17 @@ impl Engine {
         let pending = db::mempool_pending_for(&self.conn, &borrower_pk_x)?;
         let pending_opens = db::opens_pending_for(&self.conn, &borrower_pk_x)?;
         let pending_closes = db::closes_pending_for(&self.conn, &borrower_pk_x)?;
+        // Cross-class ordering (issue #16): the batch applies closes BEFORE
+        // opens and payments, so a close queued behind pending opens/payments
+        // would execute against a lower account nonce than the shadow nonce
+        // it was signed with and be rejected deterministically at build —
+        // near maturity that turns an intended close into a default. Refuse
+        // the conflicting queue up front instead.
+        if !pending.is_empty() || pending_opens > 0 {
+            return Err(ApiError::QueueConflict(
+                "pending transfers/opens must be included before a close can be queued".into(),
+            ));
+        }
         let expected = account.nonce + pending.len() as u64 + pending_opens + pending_closes;
         if w.nonce != expected {
             return Err(ApiError::NonceMismatch { expected });
@@ -2077,6 +2113,131 @@ mod engine_tests {
 
     fn transfer(from: &Keypair, to: &Keypair, amount: u64, nonce: u64) -> WireTx {
         wire(from, &fr_hex(&to.pk_x()), amount, nonce, false)
+    }
+
+    fn wire_sig(sig: &Signature) -> WireSig {
+        let (lo, hi) = sig.s_limbs();
+        WireSig {
+            r_x: fr_hex(&sig.r_x),
+            r_y: fr_hex(&sig.r_y),
+            s_lo: fr_hex(&lo),
+            s_hi: fr_hex(&hi),
+        }
+    }
+
+    fn test_position(borrower: &Keypair, lender: &Keypair) -> Position {
+        Position {
+            borrower_pk_x: borrower.pk_x(),
+            lender_pk_x: lender.pk_x(),
+            cash: 10_000,
+            coll: 20_000,
+            rate_bps: 500,
+            haircut_bps: 1_000,
+            open_ts: 0,
+            maturity_ts: 10_000,
+        }
+    }
+
+    /// A correctly signed WireIntent over `test_position(borrower, lender)`.
+    fn wire_intent(
+        initiator: &str,
+        borrower: &Keypair,
+        lender: &Keypair,
+        b_nonce: u64,
+        l_nonce: u64,
+    ) -> WireIntent {
+        let hasher = Hasher::new();
+        let p = test_position(borrower, lender);
+        let msg = open_message(&hasher, &p, b_nonce, l_nonce);
+        let signer = if initiator == "borrower" { borrower } else { lender };
+        let sig = sign_with_nonce(&hasher, signer, msg, ark_grumpkin::Fr::from(9_999u64));
+        WireIntent {
+            initiator: initiator.into(),
+            borrower_pk_x: fr_hex(&borrower.pk_x()),
+            borrower_pk_y: fr_hex(&borrower.pk_y()),
+            lender_pk_x: fr_hex(&lender.pk_x()),
+            lender_pk_y: fr_hex(&lender.pk_y()),
+            cash: p.cash.to_string(),
+            coll: p.coll.to_string(),
+            rate_bps: p.rate_bps,
+            haircut_bps: p.haircut_bps,
+            open_ts: p.open_ts,
+            maturity_ts: p.maturity_ts,
+            borrower_nonce: b_nonce,
+            lender_nonce: l_nonce,
+            sig: wire_sig(&sig),
+        }
+    }
+
+    /// Issue #16: closes/opens execute before payments, so admission must
+    /// refuse cross-class queues whose nonces cannot match execution order.
+    #[test]
+    fn cross_class_queue_conflicts_rejected() {
+        let mut e = engine(2, 4, 3600);
+        let (alice, bob) = (kp(101), kp(202));
+        fund(&mut e, 0, &alice, 1_000_000);
+        fund(&mut e, 1, &bob, 500_000);
+        let hasher = Hasher::new();
+
+        // A payment sits in the queue first (consumes shadow nonce 0).
+        e.submit_tx(transfer(&alice, &bob, 1_000, 0)).unwrap();
+
+        // payment-then-open, initiator side: alice cannot sign a new intent
+        // while her payment is pending.
+        let w = wire_intent("borrower", &alice, &bob, 1, 0);
+        assert!(matches!(e.submit_intent(w), Err(ApiError::QueueConflict(_))));
+
+        // payment-then-open, acceptor side: bob (clean queue) initiates, but
+        // the countersign is refused while either party has pending payments.
+        let w = wire_intent("lender", &alice, &bob, 1, 0);
+        let intent_id = e.submit_intent(w).unwrap().id;
+        let p = test_position(&alice, &bob);
+        let msg = open_message(&hasher, &p, 1, 0);
+        let acc_sig = sign_with_nonce(&hasher, &alice, msg, ark_grumpkin::Fr::from(8_888u64));
+        let accept = WireAccept { sig: wire_sig(&acc_sig) };
+        assert!(matches!(
+            e.accept_intent(intent_id, accept),
+            Err(ApiError::QueueConflict(_))
+        ));
+
+        // payment-then-close: a close signed at the shadow nonce would
+        // execute before the payment against a lower account nonce.
+        e.state.positions.set(0, test_position(&alice, &bob));
+        let cmsg = close_message(&hasher, 0, &test_position(&alice, &bob), 1);
+        let csig = sign_with_nonce(&hasher, &alice, cmsg, ark_grumpkin::Fr::from(7_777u64));
+        let close = WireClose {
+            pos_index: 0,
+            borrower_pk_x: fr_hex(&alice.pk_x()),
+            borrower_pk_y: fr_hex(&alice.pk_y()),
+            nonce: 1,
+            sig: wire_sig(&csig),
+        };
+        assert!(matches!(e.submit_close(close), Err(ApiError::QueueConflict(_))));
+    }
+
+    /// Issue #45: a reused nonce is idempotent only for identical content;
+    /// a different payload gets an explicit conflict, never the original
+    /// receipt.
+    #[test]
+    fn reused_nonce_different_payload_conflicts() {
+        let mut e = engine(2, 4, 3600);
+        let (alice, bob) = (kp(101), kp(202));
+        fund(&mut e, 0, &alice, 1_000_000);
+        fund(&mut e, 1, &bob, 500_000);
+
+        let r1 = e.submit_tx(transfer(&alice, &bob, 600_000, 0)).unwrap();
+        let r2 = e.submit_tx(transfer(&alice, &bob, 600_000, 0)).unwrap();
+        assert_eq!(r1.id, r2.id, "byte-equivalent resubmission stays idempotent");
+
+        assert!(matches!(
+            e.submit_tx(transfer(&alice, &bob, 1_234, 0)),
+            Err(ApiError::DuplicateNonce)
+        ));
+        // Different withdraw flag over the same nonce also conflicts.
+        assert!(matches!(
+            e.submit_tx(wire(&alice, "GB5JFZJIVTKNBXNIUOZVNUGBOW4IHZRXFDGTBXIZDPXTOAZFSCV3QQSI", 600_000, 0, true)),
+            Err(ApiError::DuplicateNonce)
+        ));
     }
 
     #[test]

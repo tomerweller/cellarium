@@ -103,6 +103,7 @@ impl ApiError {
             ApiError::BadField(_) | ApiError::BadSignature => StatusCode::BAD_REQUEST,
             ApiError::NonceMismatch { .. }
             | ApiError::DuplicateNonce
+            | ApiError::QueueConflict(_)
             | ApiError::InsufficientBalance { .. } => StatusCode::CONFLICT,
             ApiError::RecipientUnknown | ApiError::AccountUnknown | ApiError::NotFound => {
                 StatusCode::NOT_FOUND
@@ -117,6 +118,7 @@ impl ApiError {
             ApiError::BadSignature => "BAD_SIGNATURE",
             ApiError::NonceMismatch { .. } => "NONCE_MISMATCH",
             ApiError::DuplicateNonce => "DUPLICATE_NONCE",
+            ApiError::QueueConflict(_) => "QUEUE_CONFLICT",
             ApiError::InsufficientBalance { .. } => "INSUFFICIENT_BALANCE",
             ApiError::RecipientUnknown => "RECIPIENT_UNKNOWN",
             ApiError::AccountUnknown => "ACCOUNT_UNKNOWN",
