@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# NOTE: payments-era script (pre-repo interfaces); superseded by
+# scripts/e2e_testnet.sh. Kept for the localnet recipe only.
 # End-to-end spike run against a Protocol 26 localnet:
 #   deposit x2 -> submit_batch (real UltraHonk proof) -> withdrawal payout,
 # with resource measurements captured via simulateTransaction.

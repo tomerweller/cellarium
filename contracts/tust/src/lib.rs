@@ -10,7 +10,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, token::TokenInterface,
+    contract, contracterror, contractevent, contractimpl, contracttype, token::TokenInterface,
     Address, Env, MuxedAddress, String,
 };
 
@@ -46,6 +46,29 @@ pub enum DataKey {
 pub struct AllowanceValue {
     pub amount: i128,
     pub expiration_ledger: u32,
+}
+
+#[contractevent(topics = ["mint"], data_format = "single-value")]
+pub struct MintEvent {
+    #[topic]
+    pub to: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["transfer"], data_format = "single-value")]
+pub struct TransferEvent {
+    #[topic]
+    pub from: Address,
+    #[topic]
+    pub to: Address,
+    pub amount: i128,
+}
+
+#[contractevent(topics = ["burn"], data_format = "single-value")]
+pub struct BurnEvent {
+    #[topic]
+    pub from: Address,
+    pub amount: i128,
 }
 
 fn read_balance(env: &Env, addr: &Address) -> i128 {
@@ -124,8 +147,7 @@ impl TustToken {
         }
         env.storage().instance().set(&DataKey::TotalSupply, &new_supply);
         receive_balance(&env, &to, amount);
-        env.events()
-            .publish((symbol_short!("mint"), &to), amount);
+        MintEvent { to, amount }.publish(&env);
         Ok(())
     }
 
@@ -176,8 +198,7 @@ impl TokenInterface for TustToken {
         let to = to.address();
         spend_balance(&env, &from, amount).unwrap();
         receive_balance(&env, &to, amount);
-        env.events()
-            .publish((symbol_short!("transfer"), &from, &to), amount);
+        TransferEvent { from, to, amount }.publish(&env);
     }
 
     fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
@@ -186,8 +207,7 @@ impl TokenInterface for TustToken {
         spend_allowance(&env, &from, &spender, amount).unwrap();
         spend_balance(&env, &from, amount).unwrap();
         receive_balance(&env, &to, amount);
-        env.events()
-            .publish((symbol_short!("transfer"), &from, &to), amount);
+        TransferEvent { from, to, amount }.publish(&env);
     }
 
     fn burn(env: Env, from: Address, amount: i128) {
@@ -196,7 +216,7 @@ impl TokenInterface for TustToken {
         spend_balance(&env, &from, amount).unwrap();
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
-        env.events().publish((symbol_short!("burn"), &from), amount);
+        BurnEvent { from, amount }.publish(&env);
     }
 
     fn burn_from(env: Env, spender: Address, from: Address, amount: i128) {
@@ -206,7 +226,7 @@ impl TokenInterface for TustToken {
         spend_balance(&env, &from, amount).unwrap();
         let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
         env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
-        env.events().publish((symbol_short!("burn"), &from), amount);
+        BurnEvent { from, amount }.publish(&env);
     }
 
     fn decimals(_env: Env) -> u32 {

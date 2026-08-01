@@ -238,22 +238,29 @@ the matching custody token.
 
 ## Batching cadence
 
-The sequencer batches **eagerly**: on each tick (`TICK_SECS`), if more than
-one payment is pending it builds+proves+submits immediately; deposit-queue-
-full and the `BATCH_MAX_WAIT_SECS` timer remain as fallbacks so lone payments
-and deposit-only activity still settle. **Production requirement:** the
-pipeline must sustain Stellar's ~5s ledger cadence — prover hardware is
-provisioned such that bb prove(CIRCUIT_PKG) ≤ ~3.5s (see docs/PROVING.md
-§3.5), with `TICK_SECS=2` / `BATCH_MAX_WAIT_SECS=5` in deployment config so
-every ledger can carry a batch.
+The sequencer batches **eagerly**: on each tick (`TICK_SECS`) it fetches the
+oracle price, runs the maturity/margin watcher over open positions
+(enqueueing defaults/liquidations idempotently per slot), and if more than
+one op (payment/open/close) is pending — or ANY default/liquidation is due —
+builds+proves+submits immediately; deposit-queue-full and the
+`BATCH_MAX_WAIT_SECS` timer remain as fallbacks so lone ops still settle.
+The claimed `batch_ts` is set slightly behind wall-clock at build time so it
+always satisfies the contract's one-sided window despite proving latency.
+**Production requirement:** the pipeline must sustain Stellar's ~5s ledger
+cadence — prover hardware is provisioned such that bb prove(batch_repo)
+≤ ~3.5s (measured 0.80s on an M-series laptop; see REPORT.md).
 
 ## Validium trust model
 
-Validity is trustless (every root advance is proven). Data availability is
-trusted to the sequencer operator: if the operator withholds a blob, users
-cannot recompute Merkle paths for newer roots and the system freezes (funds
-cannot be stolen). Production hardening path: DAC signatures over
-`da_commitment` verified in `submit_batch`.
+Validity is trustless (every root advance is proven; PLAN §3's invariants —
+bilateral opens, borrower-only closes, condition-gated defaults/liquidations,
+exact interest, per-asset conservation — are all circuit-enforced). Data
+availability is trusted to the sequencer operator: if the operator withholds
+a blob, users cannot recompute Merkle paths for newer roots and the system
+freezes (funds cannot be stolen). The mock oracle is admin-set: margining is
+only as honest as its feed. Intent listings are counterparty-filtered but
+unauthenticated (PLAN 6.2). Production hardening path: DAC signatures over
+`da_commitment`, a real oracle (Reflector), forced exits.
 
 ## Known spike caveats (production deltas)
 

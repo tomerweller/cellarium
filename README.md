@@ -1,50 +1,73 @@
-# Soribium
+# Cellarium (Soribium-Repo)
 
-A payments **ZK-rollup (validium)** for the Stellar network, built with [Noir](https://noir-lang.org)
+A **private bilateral repo venue** running as a ZK-rollup (validium) on the
+Stellar network — an extension of [Soribium](https://github.com/tomerweller/soribium)
+from payments to repurchase agreements. Built with [Noir](https://noir-lang.org)
 and UltraHonk proofs verified on Soroban via Protocol 25/26's native BN254 +
 Poseidon host functions.
 
-Users deposit a single SEP-41 token (native XLM here) into an on-chain
-contract, transact cheaply off-chain with rollup-native keys, and a sequencer
-batches those payments into one UltraHonk proof per batch that advances the
-on-chain state root. Transaction data lives off-chain (validium), bound by a
-proven commitment and served by the sequencer's DA endpoint.
+Cash (native XLM) is lent against tokenized-Treasury collateral (a mock
+SEP-41 token, `tUST`) at a fixed term and rate. Maturity is
+timestamp-enforced, margining is oracle-driven, and everything — position
+sizes, rates, counterparties — lives off-chain inside a Noir circuit.
+Each batch of activity settles on Stellar testnet as **one UltraHonk proof**;
+only escrow totals, state roots, and commitments touch the chain.
 
 > Research prototype on **testnet only**. Not audited; see [Trust model &
 > limitations](#trust-model--limitations).
+
+## What a repo looks like here
+
+1. **Deposit** — both parties escrow into the rollup contract: the lender
+   XLM (cash), the borrower tUST (collateral). One FIFO queue per asset.
+2. **Open** — party A posts a half-signed *intent* (counterparty, cash,
+   collateral, rate, haircut, term); the sequencer shows it only to the named
+   counterparty; party B countersigns. The batch circuit verifies **both**
+   Grumpkin-Schnorr signatures, checks the lender's cash, the borrower's
+   collateral, and open-time collateral adequacy at the oracle price, then
+   moves cash to the borrower and the collateral into the position
+   (title-transfer analog).
+3. **Close (repay)** — borrower-only, before maturity. Interest is annualized
+   ACT/360 on seconds, floor division enforced *in-circuit*:
+   `interest = ⌊cash · rate_bps · elapsed / (10⁴·360·86400)⌋`.
+4. **Default** — permissionless once `batch_ts > maturity_ts`: the maturity
+   watcher hands the lender the collateral; the borrower keeps the cash.
+5. **Liquidation** — permissionless on a margin breach at half the initial
+   haircut, at the oracle price bound into the batch:
+   `coll·price·2·10⁴ < cash·(2·10⁴+haircut)·10⁷`.
+
+Every batch proves the 7-public-input relation
+`(old_state_root, new_state_root, deposit_hash, withdraw_hash, da_commitment,
+batch_ts, price)` where `state_root = Poseidon2([account_root, position_root])`.
+The contract binds `batch_ts` to the ledger clock (one-sided: claimed ≤
+ledger, lag ≤ 60s — a batch can never be future-dated into a premature
+default) and reads `price` from the oracle in the same invocation, rejecting
+stale (>5 min) prices.
 
 ## What's here
 
 | Component | Path | What it is |
 |---|---|---|
-| Circuits | `circuits/` | Noir batch state-transition circuit (Poseidon2 tree, Grumpkin Schnorr). Deployed size: `batch_n16` (4 deposits + 16 txs). |
-| Contract | `contracts/rollup/` | Soroban contract: SEP-41 custody, deposit queue, `submit_batch` verifying a 5-public-input UltraHonk proof. |
-| Harness | `harness/` | Shared Rust: account tree, keys, Poseidon2 (through a Soroban `Env`, so off-chain ≡ on-chain), witness builder, prover driver. |
-| Sequencer | `sequencer/` | Long-running backend (axum): mempool, deposit watcher, batch/prove/submit pipeline, DA + state HTTP API. |
-| Wallet | `wallet/` | Browser wallet (Vite + React + TS): L2 keys, Freighter deposits, send/withdraw/history, client-verified balances. |
+| Circuits | `circuits/` | Noir batch state-transition (`batch_repo`: 4 deposits, 2 closes, 2 defaults/liquidations, 2 opens, 4 payments per batch; Poseidon2 trees, Grumpkin Schnorr). |
+| Rollup contract | `contracts/rollup/` | Soroban: two-asset SEP-41 custody, per-asset deposit queues, `submit_batch` verifying the 7-PI UltraHonk proof, timestamp window + oracle price binding. |
+| tUST | `contracts/tust/` | Mock collateral token: pure Soroban SEP-41, 7 decimals, admin mint, supply cap ≤ u64::MAX enforced in-contract. |
+| Oracle | `contracts/oracle/` | Mock price oracle (admin-set XLM-per-tUST × 1e7 + ledger timestamp), loosely Reflector-shaped. |
+| Harness | `harness/` | Shared Rust: both trees, keys, Poseidon2 (through a Soroban `Env`, so off-chain ≡ on-chain), witness builder, interest math (fixture-tested against the circuit), prover driver. |
+| Sequencer | `sequencer/` | Long-running backend (axum): mempool + intent matching + close queue, maturity/margin watcher, batch/prove/submit pipeline, DA + state HTTP API (`/positions`, `/intents`). |
+| Wallet | `wallet/` | Browser repo desk (Vite + React + TS): two balances, deposit/withdraw per asset, post/countersign intents, live accrued interest + liquidation price per position, borrower close. |
 
-Design details: [`DESIGN.md`](DESIGN.md). Feasibility measurements behind the
-design: [`REPORT.md`](REPORT.md).
+Design details: [`DESIGN.md`](DESIGN.md). Project plan and agreed refinements:
+[`PLAN.md`](PLAN.md). Measurements: [`REPORT.md`](REPORT.md).
 
 ## Quick start (local, against testnet)
 
 Prereqs: Rust 1.95 + `wasm32v1-none`, `nargo` 1.0.0-beta.11 + `bb` 0.87.0
-(`just setup-check` verifies), the Stellar CLI, Node 22, and Docker.
+(`just setup-check` verifies), the Stellar CLI, Node 22.
 
 ```sh
-just bootstrap      # fund sequencer, deploy SAC + rollup to testnet, write .env
-just up             # docker compose: sequencer + wallet
-open http://localhost:3000
-```
-
-**Apple Silicon:** `bb` publishes amd64-linux binaries only, so the sequencer
-image is `linux/amd64` (emulated — give Docker ≥4GB + Rosetta). For fast local
-dev, run the sequencer natively instead and containerize nothing:
-
-```sh
-just bootstrap
-just sequencer      # native binary, ~0.8s proving; reads .env
-cd wallet && npm run dev            # wallet dev server → VITE_SEQUENCER_URL
+just bootstrap      # fund identities; deploy tUST + oracle + rollup; write .env
+just sequencer      # native sequencer (reads .env)
+cd wallet && npm run dev            # repo desk → VITE_SEQUENCER_URL
 ```
 
 Wallet-only development needs no backend at all:
@@ -54,79 +77,68 @@ cd wallet && npm run dev:mock &     # fixture-backed mock sequencer
 cd wallet && npm run dev
 ```
 
-## How a payment flows
+Give a browser user collateral to play with:
 
-1. **Deposit** — user signs a Stellar tx (via Freighter) calling
-   `deposit(from, l2_pk_x, amount)`; the contract escrows the token and
-   enqueues an L2 credit. The sequencer's watcher observes it from the
-   contract's FIFO queue.
-2. **Transact** — user signs an L2 payment with their Grumpkin key in the
-   browser and POSTs it to the sequencer's mempool.
-3. **Batch** — the sequencer drains deposits + payments, builds a witness,
-   proves the state transition with `bb`, and submits
-   `submit_batch(new_root, deposit_count, withdrawals, da_commitment, proof)`.
-4. **Verify** — the contract recomputes the deposit/withdrawal fold hashes
-   from its own trusted state, assembles the 5 public inputs, verifies the
-   UltraHonk proof, advances the root, releases deposits, and pays out
-   withdrawals on L1.
+```sh
+scripts/mint_tust.sh G...USER 1000000000    # 100 tUST to their Stellar account
+scripts/set_price.sh 250000000              # 25 XLM per tUST
+```
 
-The tx blob is published off-chain (sequencer `GET /da/:batch_num`) and bound
-by `da_commitment`, the 5th public input — verifiers re-fold the blob and
-check it against the on-chain commitment.
+Guided testnet demo (the full story: open → close-with-interest → default →
+price-crash liquidation):
 
-## Cloud deployment
+```sh
+scripts/demo.sh
+```
 
-The public instance runs on:
+## Privacy
 
-- **Wallet**: https://blob.tomerweller.com/soribium/ (GitHub Pages, deployed
-  by `.github/workflows/wallet.yml` — the crypto vector tests gate every
-  deploy)
-- **Sequencer**: https://soribium.fly.dev (Fly.io, deployed by
-  `.github/workflows/fly.yml` via remote amd64 builders — required, since bb
-  ships no arm64-linux binary)
-
-Ops notes:
-
-- **VM sizing is governed by the 5s-cadence requirement** (docs/PROVING.md
-  §3.5): bb prove must stay ≤ ~3.5s so every Stellar ledger can carry a
-  batch. The org is currently billing-limited to 2 shared cores, where
-  measured proving is n16 = 6.2–8.1s (fails) and n4 = 1.2–1.4s (passes) —
-  so the cloud instance runs **batch_n4**. Once the Fly billing unlock
-  allows `performance-4x`, re-bootstrap with the n16 VK and scale up.
-- Fresh instance: `just bootstrap` (new contract + `.env`) then
-  `scripts/deploy_fly.sh` (sets the secret, patches `fly.toml`, remote
-  deploys). The SQLite state lives on the `soribium_data` volume; single
-  machine by design — never scale horizontally.
-- Secrets: only `SEQUENCER_SECRET`, via `fly secrets`; everything else in
-  `fly.toml [env]` is a public identifier.
+On L1 you can see: total XLM/tUST escrowed, state roots, DA commitments, and
+the batch cadence. You cannot see who repo'd with whom, sizes, rates,
+haircuts, or maturities — those live in the off-chain DA blob and the
+position tree. The DA blob is served by the sequencer (`GET /da/:batch_num`)
+and bound by the proven `da_commitment` (fold over close messages,
+default/liquidation records, open records, and payment messages, in
+application order). Intent listings are filtered to the named counterparty
+(unauthenticated — prototype caveat; the sequencer sees everything by
+construction).
 
 ## Testing
 
 ```sh
 just check              # nargo tests + Rust tests + wallet crypto/build
-cargo test              # contract + harness + sequencer
-scripts/e2e_testnet.sh  # full deposit→batch→withdraw against testnet, asserted
+cargo test              # contracts + harness + sequencer
+scripts/e2e_testnet.sh  # the full asserted story against testnet
 ```
 
-`scripts/e2e_testnet.sh` deploys a fresh contract, boots the native sequencer,
-runs two deposits → an auto-batched credit → a signed transfer + withdrawal →
-a proved batch, and asserts L2 balances, sequencer-root == on-chain-root, DA
-blob availability, and stale-nonce rejection.
+The e2e deploys fresh contracts, boots the native sequencer, and asserts:
+multi-asset deposits/transfers/withdrawals (with an exact L1 tUST payout),
+per-asset balance isolation, a bilateral open via the intent flow, a close
+whose interest is recomputed independently and matched **to the stroop**, a
+watcher-driven default crediting the lender's collateral, a price-crash
+liquidation, an under-collateralized open rejection, sequencer-root ==
+on-chain-root at every stage, DA blob availability, and replay/gap-nonce
+rejection.
+
+The three-way hash contract (circuit ⇄ contract ⇄ harness ⇄ wallet) is
+pinned by golden vectors in `fixtures/vectors.json`
+(`cargo run -p harness -- vectors-json`); each stack's suite fails if any
+layout drifts.
 
 ## Trust model & limitations
 
-Validity is **trustless** — every root transition is proven, so funds cannot
-be stolen. Data availability is **trusted to the sequencer operator**: if it
-withholds a batch blob, users can't compute Merkle paths for newer roots and
-the system freezes (a validium's defining trade-off). Production hardening:
-DAC signatures over `da_commitment` verified in `submit_batch`.
+Validity is **trustless** — every state transition is proven, so funds cannot
+be stolen: both signatures are required to open, only the borrower can close
+(and only before maturity), defaults/liquidations are valid only when their
+condition holds at the bound timestamp/price, and value is conserved per
+asset across accounts + positions + queues. Data availability is **trusted to
+the sequencer operator**: withheld blobs freeze the system (funds can't be
+stolen, but exits need the operator). The mock oracle is admin-set — margining
+is only as honest as its price feed.
 
-Known deltas tracked for a production version (also in `DESIGN.md`):
-single-operator sequencer with no forced-exit / censorship escape hatch;
-localStorage key custody in the wallet; 256-account tree capacity;
-circuit-level `pk_x` uniqueness (honest builder only); immutable VK
-(a new circuit is a new contract instance); the verifier crate is unaudited.
-Active spends require even-y Grumpkin keys; the custody token's total supply
-must be ≤ `u64::MAX` base units (true for native XLM) so L2 balances can never
-overflow the circuit's u64 range; the public padding keypair cannot receive
-deposits.
+Known deltas tracked for a production version (also in `DESIGN.md` /
+`PLAN.md` §4): single-operator sequencer, no forced exits, no DAC, no
+rehypothecation, full (not partial) liquidation with no margin top-up,
+immutable VK per instance, localStorage key custody, 256 accounts / 256
+open positions, unaudited verifier crate, and the 60s/5-min timestamp/price
+windows documented in DESIGN.md.

@@ -98,3 +98,81 @@ nargo 1.0.0-beta.11 + bb 0.87.0 + NethermindEth/rs-soroban-ultrahonk @
 5. Real sequencer service (mempool, persistence, recovery) — the spike
    harness is CLI-driven.
 6. Third-party audit of the verifier crate before any real funds.
+
+---
+
+# Repo extension (Cellarium) — measurements & verdict
+
+**Date:** 2026-07-31 · The payments validium above was extended into a
+**private bilateral repo venue** (PLAN.md): multi-asset accounts (XLM cash /
+tUST collateral), a position tree, bilateral opens, borrower closes with
+in-circuit ACT/360 interest, permissionless maturity defaults, and
+oracle-price liquidations — all inside one Noir circuit, 7 public inputs,
+still one UltraHonk proof per batch. All milestones' e2e suites pass on
+testnet (Protocol 27).
+
+## Circuit cost (batch_repo, M-series laptop, 12 threads)
+
+| circuit | shape | circuit size (gates) | ACIR opcodes | bb prove | peak RSS |
+|---|---|---|---|---|---|
+| batch_repo @M2 | D=4 O=2 T=4 | 90,334 (2^17 domain) | — | 0.54 s | ~380 MB |
+| batch_repo @M3+ | D=4 C=2 L=2 O=2 T=4 | 132,327 (2^18 domain) | 23,644 | 0.80 s | 752 MB |
+
+Sig-verifications dominate: T + 2·O + C = 10 Grumpkin MSM pairs per batch,
+plus ~34 Merkle path updates across two depth-8 trees. Prove time stays ~4×
+under the 3.5 s cadence budget; the batch sizes are const-generic parameters
+and have plenty of headroom to grow (extrapolating the payments table above,
+even 4× larger shapes stay within budget on deployment-class hardware).
+
+## On-chain cost (testnet, Protocol 27)
+
+| metric | value |
+|---|---|
+| submit_batch declared instructions | **108,041,218** (27% of the 400M cap) |
+| native test-env measurement | 71.5M cpu insns (wasm ≈ 1.5× — matches) |
+| submit_batch fee charged | **0.0248 XLM** (proof 14,592 B; write 3,152 B) |
+| verify-only (native env) | ~66M insns — verification is still logarithmic |
+
+The 7-PI upgrade (2 extra field bindings + oracle cross-contract read +
+timestamp checks + second token/queue) added ~8M declared instructions over
+the payments-era submit_batch. CPU remains a non-issue; the practical limits
+are unchanged from the spike (prover throughput, ledger-wide budgets).
+
+Per-op cost at the demo shape (1 open + 1 close/liq + 4 payments + 4
+deposits per batch ≈ 10 ops): **~0.0025 XLM/op**, dominated by the fixed
+proof bytes. As with payments, the win is privacy and features, not fees.
+
+## What the repo e2e proves on every run (scripts/e2e_testnet.sh)
+
+deposits/transfers/withdrawals in both assets with exact L1 payouts →
+bilateral open via the counterparty-filtered intent flow → close with
+interest recomputed independently and asserted **to the stroop** → maturity
+watcher default crediting the lender's collateral → admin price crash →
+margin watcher liquidation → under-collateralized open evicted — with
+sequencer-state-root == on-chain-root asserted after every phase, DA blob
+re-foldable, and replay/gap-nonce rejection.
+
+## Security invariants (PLAN.md §3) — where each is enforced/tested
+
+| invariant | enforcement | test |
+|---|---|---|
+| value conservation per asset | circuit (all ops balance) | harness prop-tests + e2e balance sums |
+| no position slot collision | empty-leaf proof under the running pos root | `open_occupied_slot` circuit negative |
+| both signatures to open | two verify_sig calls | `open_single_sig`, `open_terms_not_signed` |
+| close only borrower, only ≤ maturity | sig + maturity range check | `close_wrong_signer`, `close_after_maturity` |
+| default only past maturity | strict range check, no signature | `default_at_maturity` |
+| liquidation only on breach at bound price | cross-multiplied comparison | `liquidation_fixture` healthy-price negative |
+| exact interest | floor-division gadget | interest unit vectors in circuit+wallet, e2e stroop assert |
+| withdrawal can't be redirected/re-amounted/re-asseted | DOMAIN_WD2 fold binds (dest, asset, amount) | contract negatives |
+| fresh price required for every batch | contract staleness check (5 min) | `stale_price_rejected` |
+| replay | old_state_root binding | contract replay negative + e2e |
+| padding key blacklisted in every role | circuit asserts | pad negatives (both roles) |
+
+## Verdict
+
+The repo venue works end-to-end on testnet with the same toolchain pins as
+the payments spike (no version bisection needed) and comfortable margins on
+every budget. The economics conclusion from the spike stands, sharpened:
+this design pays a fixed ~0.025 XLM per batch for **complete counterparty/
+price/size privacy** on a public ledger — something L1 cannot offer at any
+fee.

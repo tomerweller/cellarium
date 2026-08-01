@@ -40,6 +40,11 @@ build-contract:
 prove-demo:
     cargo run -q -p harness -- demo-batch
     cargo run -q -p harness -- demo-batch-n16
+    cargo run -q -p harness -- demo-repo-batch
+
+# Guided repo-story demo against testnet (deploys fresh contracts)
+demo:
+    scripts/demo.sh
 
 # Full custody loop against localnet with resource measurements
 # (requires: stellar container start local --protocol-version 26 --limits unlimited)

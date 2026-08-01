@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# NOTE: payments-era script (pre-repo interfaces); superseded by
+# scripts/e2e_testnet.sh.
 # Phase B1c checkpoint: drive the full sequencer pipeline against testnet —
 # deposit x2 -> signed transfer + withdrawal -> auto-built proven batch ->
 # on-chain root advance + withdrawal payout. Assumes a fresh contract was
