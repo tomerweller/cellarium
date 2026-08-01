@@ -1,9 +1,11 @@
 # Cellarium — Design Spec
 
 Cellarium is a multi-asset ZK-rollup operating as a **validium** on Stellar
-testnet — being extended into a private bilateral repo venue (PLAN.md): batch
+testnet — being extended into a bilateral repo venue (PLAN.md): batch
 transaction data lives off-chain (served by the sequencer's DA endpoint) and
-is bound on-chain by a proven commitment.
+is bound on-chain by a proven commitment. Note that the DA blob is public
+plaintext today, so repo terms are off-ledger but NOT confidential (issues
+#44/#47 track the redesign; see README "Privacy").
 
 **Assets** (ids used in hashes as Field, in envelopes as u32):
 

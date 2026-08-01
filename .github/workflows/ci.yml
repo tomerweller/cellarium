@@ -57,6 +57,22 @@ jobs:
       - name: Tests (every workspace package, incl. oracle and tUST)
         run: cargo test --workspace
 
+  # Issues #44/#47: the deployed system serves plaintext DA and non-ZK
+  # proofs, so user-facing copy must not promise confidentiality until the
+  # redesign lands. Phrase-level guard; extend the list with any new claim
+  # that gets corrected.
+  privacy-claims:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: No privacy claims stronger than the deployed mode
+        run: |
+          if grep -RniE "private bilateral repo|cannot see who|nobody can see|terms (are|stay|remain) (hidden|secret|confidential)|fully private" \
+              README.md DESIGN.md wallet/src wallet/index.html; then
+            echo "::error::User-facing copy claims more privacy than the deployed non-ZK/plaintext-DA mode provides (issues #44/#47)."
+            exit 1
+          fi
+
   wallet:
     runs-on: ubuntu-latest
     steps:

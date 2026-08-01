@@ -1,6 +1,6 @@
 # Cellarium
 
-A **private bilateral repo venue** running as a ZK-rollup (validium) on the
+A **bilateral repo venue** running as a ZK-rollup (validium) on the
 Stellar network. Built with [Noir](https://noir-lang.org) and UltraHonk
 proofs verified on Soroban via Protocol 25/26's native BN254 + Poseidon host
 functions.
@@ -104,27 +104,37 @@ manual re-bootstrap. The wallet picks up the new contract ids at runtime
 from `GET /params`. (The abandoned instance's queued deposits remain
 reclaimable via its permissionless `refund_deposit` after the 24h timeout.)
 
-## Privacy
+## Privacy (read this before assuming any)
 
-On L1 you can see: total XLM/tUST escrowed, state roots, DA commitments, and
-the batch cadence. You cannot see who repo'd with whom, sizes, rates,
-haircuts, or maturities — those live in the off-chain DA blob and the
-position tree. The DA blob is served by the sequencer (`GET /da/:batch_num`)
-and bound by the proven `da_commitment` (fold over close messages,
-default/liquidation records, open records, and payment messages, in
-application order). Intent listings are filtered to the named counterparty
-AND require a signed read-auth challenge proving control of the queried key
-(issue #1 L12; the sequencer still sees everything by construction).
+**What today's deployment actually provides is "not on the L1 ledger" — not
+confidentiality.** Be precise about the difference:
 
-One caveat for proof-observers: the deployed flavor is **non-ZK** UltraHonk,
-which does not blind the witness. The privacy statements above are heuristic
-against someone holding the proof bytes themselves — extraction from a
-2^17-row trace is unanalyzed, not cryptographically impossible. The ZK
-flavor was measured (issue #1 M6): `bb prove --zk` costs ~0.64s vs ~0.50s
-non-ZK on the dev machine with equal memory — affordable — but it emits a
-507-field (16,224-byte) proof that the pinned Soroban verifier
-(456-field/14,592-byte, non-ZK only) cannot verify. Turning it on requires a
-ZK-capable verifier crate, tracked as a production delta in DESIGN.md.
+- **On L1** you can see: total XLM/tUST escrowed, state roots, DA
+  commitments, and the batch cadence. Repo terms are not in the ledger
+  entries themselves.
+- **But the DA blob is public plaintext.** The sequencer serves
+  `GET /da/:batch_num` without authentication (that public replayability is
+  what makes the validium state reconstructible), and the blob contains
+  counterparties, amounts, rates, haircuts, maturities, nonces, withdrawal
+  destinations, and signatures — bound by the proven `da_commitment`.
+  Account, history, and position APIs are likewise unauthenticated; intent
+  listings are the exception (they require a signed read-auth challenge
+  proving control of the queried key — issue #1 L12). The sequencer
+  operator sees everything by construction.
+- **Proofs are non-ZK.** The deployed flavor is non-ZK UltraHonk, which does
+  not blind the witness. Even proof bytes are only heuristically private:
+  extraction from a 2^17-row trace is unanalyzed, not cryptographically
+  impossible. The ZK flavor was measured (issue #1 M6): `bb prove --zk`
+  costs ~0.64s vs ~0.50s non-ZK with equal memory — affordable — but emits
+  a 507-field (16,224-byte) proof the pinned Soroban verifier
+  (456-field/14,592-byte, non-ZK only) cannot verify; enabling it requires
+  a ZK-capable verifier crate (production delta in DESIGN.md).
+
+In short: **anyone who can reach the sequencer can read full bilateral repo
+terms from the DA blob.** A confidential-DA/authenticated-read redesign is
+tracked in issue #44 and ZK-mode enablement in issue #47; until those land,
+marketing and UI copy must not promise term confidentiality (CI enforces
+this with a phrase guard).
 
 ## Testing
 
