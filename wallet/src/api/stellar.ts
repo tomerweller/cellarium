@@ -66,7 +66,10 @@ export async function deriveKeyMaterial(): Promise<{ address: string; sig: Uint8
 }
 
 function server(params: Params): rpc.Server {
-  return new rpc.Server(params.rpc_url);
+  // Client-side deadline on every RPC round-trip (issue #25): account reads,
+  // simulation, preparation, submission, and polling must all fail visibly
+  // rather than leave buttons busy forever.
+  return new rpc.Server(params.rpc_url, { timeout: 15_000 });
 }
 
 /** Connect Freighter and hard-check its network matches the sequencer's. */

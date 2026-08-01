@@ -1,28 +1,23 @@
-// Local record of L1 deposits that have confirmed on Stellar but whose L2
-// credit hasn't landed yet (it lands when the sequencer batches the queue).
-// The sequencer's per-account API has no "incoming deposit" signal, so the
-// wallet tracks these locally to power the "settling" indicator, clearing an
-// entry once the account balance reflects it.
-const KEY = 'cellarium.v1.pendingDeposits';
+// Local record of L1 deposits the wallet has submitted whose L2 credit
+// hasn't landed yet. Entries are written the moment Stellar ACCEPTS the
+// transaction (issue #19: an ambiguous confirmation timeout must never lose
+// the hash), carry the asset and the pre-deposit balance baseline
+// (issue #24: existing cash must not clear a new deposit, and tUST deposits
+// reconcile against the collateral balance), and are only removed on a
+// definitive outcome — never silently aged out.
+const KEY = 'cellarium.v2.pendingDeposits';
 
 export interface PendingDeposit {
   pkX: string;
-  amount: string; // stroops, decimal
+  /** 0 = cash (XLM), 1 = collateral (tUST). */
+  asset: number;
+  amount: string; // base units, decimal
+  /** L2 balance of `asset` when the deposit was submitted. */
+  baseline: string;
   txHash: string;
   at: number;
-}
-
-export function list(pkX: string): PendingDeposit[] {
-  try {
-    const all = JSON.parse(localStorage.getItem(KEY) ?? '[]') as PendingDeposit[];
-    return all.filter((d) => d.pkX === pkX);
-  } catch {
-    return [];
-  }
-}
-
-function writeAll(all: PendingDeposit[]): void {
-  localStorage.setItem(KEY, JSON.stringify(all));
+  /** submitted = accepted by Stellar, confirmation unknown; confirmed = L1 success, awaiting L2 credit. */
+  status: 'submitted' | 'confirmed';
 }
 
 function readAll(): PendingDeposit[] {
@@ -33,26 +28,39 @@ function readAll(): PendingDeposit[] {
   }
 }
 
+function writeAll(all: PendingDeposit[]): void {
+  localStorage.setItem(KEY, JSON.stringify(all));
+}
+
+export function list(pkX: string): PendingDeposit[] {
+  return readAll().filter((d) => d.pkX === pkX);
+}
+
 export function add(d: PendingDeposit): void {
   writeAll([...readAll(), d]);
 }
 
+/** Mark a submitted deposit as confirmed on L1 (still awaiting L2 credit). */
+export function markConfirmed(txHash: string): void {
+  writeAll(readAll().map((d) => (d.txHash === txHash ? { ...d, status: 'confirmed' as const } : d)));
+}
+
+/** Remove after a DEFINITIVE outcome (L1 failure, or manual dismissal). */
+export function remove(txHash: string): void {
+  writeAll(readAll().filter((d) => d.txHash !== txHash));
+}
+
 /**
- * Drop entries for this account once the on-chain balance has caught up to
- * (or past) the total we were waiting on — the credit has landed.
+ * Drop entries whose credit has landed: the balance of the entry's asset has
+ * reached baseline + amount. Unresolved entries are kept indefinitely —
+ * they render as pending/unknown rather than disappearing (issue #24).
  */
-export function reconcile(pkX: string, balance: bigint): void {
+export function reconcile(pkX: string, cash: bigint, coll: bigint): void {
   const all = readAll();
-  const mine = all.filter((d) => d.pkX === pkX);
-  if (mine.length === 0) return;
-  const owed = mine.reduce((acc, d) => acc + BigInt(d.amount), 0n);
-  // We don't know the pre-deposit balance, so use a simple heuristic: once the
-  // account exists and its balance is at least the total pending, assume the
-  // credits landed and clear them. Ages out after 5 minutes regardless.
-  const now = Date.now();
-  const settled = balance >= owed;
-  const kept = all.filter(
-    (d) => d.pkX !== pkX || (!settled && now - d.at < 5 * 60_000),
-  );
+  const kept = all.filter((d) => {
+    if (d.pkX !== pkX) return true;
+    const balance = d.asset === 1 ? coll : cash;
+    return balance < BigInt(d.baseline) + BigInt(d.amount);
+  });
   if (kept.length !== all.length) writeAll(kept);
 }

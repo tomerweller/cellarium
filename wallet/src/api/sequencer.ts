@@ -144,11 +144,22 @@ export class ApiError extends Error {
   }
 }
 
+/** Client-side deadline for sequencer calls (issue #25): a hung API must
+ * fail visibly instead of leaving pages loading forever. Submissions are
+ * idempotent server-side (issue #45), so timing out a write is retry-safe. */
+const REQUEST_TIMEOUT_MS = 15_000;
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
   let res: Response;
   try {
-    res = await fetch(`${SEQUENCER_URL}${path}`, init);
-  } catch {
+    res = await fetch(`${SEQUENCER_URL}${path}`, {
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      ...init,
+    });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'TimeoutError') {
+      throw new ApiError('TIMEOUT', `the sequencer did not answer within ${REQUEST_TIMEOUT_MS / 1000}s`, 0);
+    }
     // fetch rejects with an unhelpful TypeError when the host is unreachable.
     throw new ApiError('SEQUENCER_UNREACHABLE', `could not reach the sequencer at ${SEQUENCER_URL}`, 0);
   }

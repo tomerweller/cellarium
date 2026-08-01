@@ -152,9 +152,16 @@ function PositionList({
               {borrower ? 'counterparty (lender)' : 'counterparty (borrower)'}:{' '}
               <CopyableHex value={borrower ? p.lender_pk_x : p.borrower_pk_x} />
             </div>
+            {/* Local wall-clock estimate only (issue #26): settlement uses
+                the batch timestamp chosen at build time, so the enforced
+                repayment can exceed this while the close waits for inclusion. */}
             <div>
-              accrued interest: <strong>{stroopsToXlm(accrued)} XLM</strong>
-              {' · '}repay now: {stroopsToXlm(BigInt(p.cash) + accrued)} XLM
+              accrued interest: <strong>≈{stroopsToXlm(accrued)} XLM</strong>
+              {' · '}est. repayment: ≈{stroopsToXlm(BigInt(p.cash) + accrued)} XLM
+            </div>
+            <div className="muted">
+              Estimate at your device's clock; the enforced amount uses the settlement batch's
+              timestamp and grows until the close is included. Keep a small balance buffer.
             </div>
             <div className="muted">
               liquidation below {stroopsToXlm(liquidationPrice(p))} XLM/tUST · matures{' '}
@@ -163,7 +170,7 @@ function PositionList({
             </div>
             {borrower && !matured && (
               <button disabled={busy} onClick={() => close(p)}>
-                Close (repay {stroopsToXlm(BigInt(p.cash) + accrued)} XLM)
+                Close (repay ≈{stroopsToXlm(BigInt(p.cash) + accrued)} XLM at settlement)
               </button>
             )}
           </div>

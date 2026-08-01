@@ -1,11 +1,12 @@
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
-import { useParams } from '../api/queries';
+import { useAccount, useParams } from '../api/queries';
 import { useKey } from '../keys/KeyContext';
 import { awaitTx, connectFreighter, deposit, friendbotUrl, fundingStatus } from '../api/stellar';
 import * as pendingDeposits from '../keys/pendingDeposits';
-import { xlmToStroops } from '../format';
+import { txUrl } from '../config';
+import { stroopsToXlm, xlmToStroops } from '../format';
 import { ErrorText, Stepper } from '../components/common';
 import { Onboarding } from './Onboarding';
 
@@ -14,6 +15,7 @@ const STEPS = ['Connect Freighter', 'Confirm in Freighter', 'Waiting for Stellar
 export function Deposit() {
   const { wallet } = useKey();
   const { data: params } = useParams();
+  const { data: account } = useAccount(wallet?.pkX);
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [amount, setAmount] = useState('');
@@ -21,16 +23,24 @@ export function Deposit() {
   const [step, setStep] = useState<number>(-1); // -1 idle; 0..3 active; 4 done
   const [gAddr, setGAddr] = useState<string | null>(null);
   const [needsFunding, setNeedsFunding] = useState(false);
+  const [unknownHash, setUnknownHash] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
+  const [, setBump] = useState(0); // re-render after pendingDeposits changes
+  const rerender = () => setBump((n) => n + 1);
 
   if (!wallet) return <Onboarding />;
 
+  // Confirmation-ambiguous deposits block a blind retry (issue #19): the
+  // earlier submission may still land, and submitting again doubles it.
+  const unresolved = pendingDeposits.list(wallet.pkX);
+  const hasUnknown = unresolved.some((d) => d.status === 'submitted');
   const busy = step >= 0 && step < 4;
 
   async function run() {
     if (!params || !wallet) return;
     setError(null);
     setNeedsFunding(false);
+    setUnknownHash(null);
     try {
       const stroops = xlmToStroops(amount);
       setStep(0);
@@ -51,20 +61,36 @@ export function Deposit() {
       }
       setStep(1);
       const hash = await deposit(params, addr, wallet.pkX, asset, stroops);
+      // Stellar ACCEPTED the transaction: persist the hash NOW, before any
+      // polling can time out ambiguously (issue #19), with the asset and the
+      // pre-deposit balance baseline for reconciliation (issue #24).
+      const baseline = asset === 1 ? (account?.coll ?? '0') : (account?.cash ?? '0');
+      pendingDeposits.add({
+        pkX: wallet.pkX,
+        asset,
+        amount: stroops.toString(),
+        baseline,
+        txHash: hash,
+        at: Date.now(),
+        status: 'submitted',
+      });
       setStep(2);
       const outcome = await awaitTx(params, hash);
       if (outcome === 'failed') {
+        // Definitive L1 failure: nothing to wait for, retry is safe.
+        pendingDeposits.remove(hash);
         throw new Error(
           `The deposit transaction failed on Stellar (tx ${hash.slice(0, 8)}…). No funds were credited — try again.`,
         );
       }
       if (outcome === 'timeout') {
-        throw new Error(
-          "Stellar hasn't confirmed the deposit yet. Give it a minute — if your balance doesn't update, retry.",
-        );
+        // Ambiguous: the tx may still succeed. Keep the record, show it as
+        // pending/unknown, and warn against a duplicate submission.
+        setUnknownHash(hash);
+        setStep(-1);
+        return;
       }
-      // Track locally so the "settling" indicator shows until the L2 credit lands.
-      pendingDeposits.add({ pkX: wallet.pkX, amount: stroops.toString(), txHash: hash, at: Date.now() });
+      pendingDeposits.markConfirmed(hash);
       setStep(4);
       qc.invalidateQueries({ queryKey: ['account'] });
       qc.invalidateQueries({ queryKey: ['status'] });
@@ -72,6 +98,18 @@ export function Deposit() {
       setError(e);
       setStep(-1);
     }
+  }
+
+  /** Re-poll an ambiguous deposit to a terminal state (resumable across reloads). */
+  async function recheck(hash: string) {
+    if (!params) return;
+    setError(null);
+    const outcome = await awaitTx(params, hash);
+    if (outcome === 'success') pendingDeposits.markConfirmed(hash);
+    if (outcome === 'failed') pendingDeposits.remove(hash);
+    if (outcome !== 'timeout') setUnknownHash(null);
+    qc.invalidateQueries({ queryKey: ['account'] });
+    rerender();
   }
 
   return (
@@ -98,9 +136,15 @@ export function Deposit() {
         disabled={busy}
       />
       <div style={{ marginTop: '1rem' }}>
-        <button className="primary" onClick={run} disabled={busy || amount.length === 0}>
+        <button className="primary" onClick={run} disabled={busy || hasUnknown || amount.length === 0}>
           {busy ? 'Depositing…' : 'Deposit with Freighter'}
         </button>
+        {hasUnknown && !busy && (
+          <p className="muted">
+            A previous deposit hasn't reached a definitive outcome yet — check its status below
+            before submitting again, or you risk depositing twice.
+          </p>
+        )}
       </div>
 
       {step >= 0 && <Stepper steps={STEPS} current={step} />}
@@ -111,10 +155,43 @@ export function Deposit() {
           <a href={friendbotUrl(gAddr)} target="_blank" rel="noreferrer">Fund it with friendbot</a>, then retry.
         </p>
       )}
+      {unknownHash && (
+        <p className="muted" role="alert">
+          Stellar hasn't confirmed the deposit yet — it may still succeed, so it is tracked below
+          rather than discarded.{' '}
+          <a href={txUrl(unknownHash)} target="_blank" rel="noreferrer">View on stellar.expert</a>.
+        </p>
+      )}
       {step === 4 && (
         <p className="ok">Deposited. Your balance updates when the next batch settles.</p>
       )}
       <ErrorText error={error} />
+
+      {unresolved.length > 0 && (
+        <section style={{ marginTop: '1.2rem' }}>
+          <h3>In-flight deposits</h3>
+          {unresolved.map((d) => (
+            <div className="list-row" key={d.txHash}>
+              <div className="who">
+                <span className="kind">
+                  {stroopsToXlm(BigInt(d.amount))} {d.asset === 1 ? 'tUST' : 'XLM'} —{' '}
+                  {d.status === 'confirmed' ? 'confirmed, awaiting L2 credit' : 'confirmation unknown'}
+                </span>
+                <span className="cp">
+                  <a href={txUrl(d.txHash)} target="_blank" rel="noreferrer">
+                    tx {d.txHash.slice(0, 8)}…
+                  </a>
+                </span>
+              </div>
+              {d.status === 'submitted' && (
+                <button className="btn-inline" onClick={() => recheck(d.txHash)}>
+                  Check status
+                </button>
+              )}
+            </div>
+          ))}
+        </section>
+      )}
     </div>
   );
 }

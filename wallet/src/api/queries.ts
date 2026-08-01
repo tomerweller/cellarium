@@ -6,7 +6,15 @@ import * as pendingDeposits from '../keys/pendingDeposits';
 import { accountOrNull, api } from './sequencer';
 
 export function useParams() {
-  return useQuery({ queryKey: ['params'], queryFn: api.params, staleTime: Infinity });
+  // Bounded freshness (issue #31): an open tab must learn within ~a minute
+  // that the sequencer URL was re-bootstrapped with a new contract/token/RPC
+  // instead of depositing to an obsolete contract forever.
+  return useQuery({
+    queryKey: ['params'],
+    queryFn: api.params,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
 }
 
 export function useStatus() {
@@ -50,9 +58,12 @@ export function usePending(pkX: string | undefined): Pending {
   const { data: history } = useHistory(pkX);
   const { data: account } = useAccount(pkX);
 
-  // Clear settled deposits once the balance reflects them.
+  // Clear settled deposits once the corresponding asset balance has moved
+  // past each entry's baseline + amount (issue #24).
   useEffect(() => {
-    if (pkX && account) pendingDeposits.reconcile(pkX, BigInt(account.cash));
+    if (pkX && account) {
+      pendingDeposits.reconcile(pkX, BigInt(account.cash), BigInt(account.coll));
+    }
   }, [pkX, account]);
 
   const sending = (history?.entries ?? []).filter(
