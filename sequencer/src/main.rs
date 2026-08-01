@@ -54,8 +54,8 @@ async fn run() -> Result<(), String> {
     // Chain client + boot reconciliation (contract is the source of truth).
     let client: Arc<dyn stellar::StellarClient> =
         Arc::new(stellar::CliClient::new(&cfg).map_err(|e| format!("stellar client: {e}"))?);
-    let chain_root = client.root().map_err(|e| format!("read root: {e}"))?;
-    let chain_batch_num = client.batch_num().map_err(|e| format!("read batch_num: {e}"))?;
+    let (chain_root, chain_batch_num) = stellar::consistent_root_and_batch(client.as_ref(), 5)
+        .map_err(|e| format!("read chain root/batch_num: {e}"))?;
     let dep_cursors = [
         // Cursors persist in meta; default to 0 on a fresh DB.
         db::meta_get_u64(&conn, "dep_cursor_0").map_err(|e| e.to_string())?,

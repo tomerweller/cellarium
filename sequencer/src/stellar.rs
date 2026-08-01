@@ -90,6 +90,30 @@ pub trait StellarClient: Send + Sync {
     fn submit_batch(&self, envelope_json: &str) -> Result<(), ChainError>;
 }
 
+/// Read (root, batch_num) as a self-consistent pair (issue #40): each CLI
+/// call simulates against whatever ledger is current, so a batch landing
+/// between the two reads would hand boot reconciliation an impossible
+/// root/counter combination. Re-read the root after the counter and accept
+/// only when both root observations agree.
+pub fn consistent_root_and_batch(
+    client: &dyn StellarClient,
+    attempts: u32,
+) -> Result<(Fr, u64), ChainError> {
+    let mut root = client.root()?;
+    for attempt in 0..attempts {
+        let batch_num = client.batch_num()?;
+        let root_after = client.root()?;
+        if root_after == root {
+            return Ok((root, batch_num));
+        }
+        tracing::info!(attempt, "chain advanced between boot reads; retrying");
+        root = root_after;
+    }
+    Err(ChainError::Cli(format!(
+        "chain root kept changing across {attempts} boot read attempts"
+    )))
+}
+
 /// Identity name the secret is registered under at boot. The raw S… secret
 /// must never appear on a CLI argv (visible in `ps`/audit logs — issue #2
 /// H4); it reaches the CLI exactly once, via environment, at registration.
@@ -321,6 +345,61 @@ impl StellarClient for CliClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use harness::poseidon::fr_from_u64;
+
+    /// Chain whose (root, batch_num) advance together after `advance_after`
+    /// root reads — simulating a batch landing between the boot reads.
+    struct AdvancingChain {
+        root_reads: AtomicU64,
+        advance_after: u64,
+    }
+    impl AdvancingChain {
+        fn epoch(&self, reads: u64) -> u64 {
+            if reads >= self.advance_after { 2 } else { 1 }
+        }
+    }
+    impl StellarClient for AdvancingChain {
+        fn root(&self) -> Result<Fr, ChainError> {
+            let reads = self.root_reads.fetch_add(1, Ordering::Relaxed);
+            Ok(fr_from_u64(self.epoch(reads + 1)))
+        }
+        fn batch_num(&self) -> Result<u64, ChainError> {
+            Ok(self.epoch(self.root_reads.load(Ordering::Relaxed)))
+        }
+        fn oracle_price(&self) -> Result<(u64, u64), ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+        fn refresh_oracle_price(&self, _price: u64) -> Result<(), ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+        fn dep_tail(&self, _asset: u32) -> Result<u64, ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+        fn get_pending_deposit(&self, _asset: u32, _seq: u64) -> Result<(Fr, u64), ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+        fn submit_batch(&self, _envelope_json: &str) -> Result<(), ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+    }
+
+    /// Issue #40: a batch landing between the root and counter reads must
+    /// not produce a mismatched pair — the retry converges on epoch 2.
+    #[test]
+    fn boot_reads_converge_when_chain_advances_between_calls() {
+        let chain = AdvancingChain { root_reads: AtomicU64::new(0), advance_after: 2 };
+        let (root, batch_num) = consistent_root_and_batch(&chain, 5).unwrap();
+        assert_eq!(root, fr_from_u64(2));
+        assert_eq!(batch_num, 2);
+    }
+
+    #[test]
+    fn boot_reads_accept_stable_chain_first_try() {
+        let chain = AdvancingChain { root_reads: AtomicU64::new(0), advance_after: 0 };
+        let (root, batch_num) = consistent_root_and_batch(&chain, 5).unwrap();
+        assert_eq!(root, fr_from_u64(2));
+        assert_eq!(batch_num, 2);
+    }
 
     #[test]
     fn timeout_kills_hanging_child() {
