@@ -172,6 +172,9 @@ pub fn apply_open(
         // Canonical y-parity for both signers.
         assert(is_even_y(o.borrower_pk_y));
         assert(is_even_y(o.lender_pk_y));
+        // Issue #1 L9: incremented nonces must stay in u64 (no wrap to 0).
+        assert_u64(o.borrower_nonce);
+        assert_u64(o.lender_nonce);
         // Terms must be internally consistent even before M3 binds batch_ts.
         assert_u64(o.maturity_ts - 1 - o.open_ts); // maturity_ts > open_ts
         // M3: cannot open a repo that is already past maturity.

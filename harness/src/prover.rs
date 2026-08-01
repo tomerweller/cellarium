@@ -91,8 +91,10 @@ fn sig_toml(out: &mut String, table: &str, sig: &crate::keys::Signature) {
 }
 
 /// Render the repo batch witness as a Prover.toml matching
-/// batch_repo/src/main.nr (7 public inputs + private root openings).
-pub fn to_repo_prover_toml(w: &RepoBatchWitness) -> String {
+/// batch_repo/src/main.nr (8 public inputs + private root openings).
+/// `instance_id` = address_to_field(rollup contract) — the 8th public input
+/// the contract derives from its own address (issue #1 L10).
+pub fn to_repo_prover_toml(w: &RepoBatchWitness, instance_id: &Fr) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "old_state_root = {}", fr_lit(&w.old_state_root));
     let _ = writeln!(out, "new_state_root = {}", fr_lit(&w.new_state_root));
@@ -101,6 +103,7 @@ pub fn to_repo_prover_toml(w: &RepoBatchWitness) -> String {
     let _ = writeln!(out, "da_commitment = {}", fr_lit(&w.da_commitment));
     let _ = writeln!(out, "batch_ts = {}", u64_lit(w.batch_ts));
     let _ = writeln!(out, "price = {}", u64_lit(w.price));
+    let _ = writeln!(out, "instance_id = {}", fr_lit(instance_id));
     let _ = writeln!(out, "old_acct_root = {}", fr_lit(&w.old_acct_root));
     let _ = writeln!(out, "old_pos_root = {}", fr_lit(&w.old_pos_root));
     emit_deposits(&mut out, &w.deposits);

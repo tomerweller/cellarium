@@ -15,7 +15,7 @@ import { pkFromSk } from './grumpkin';
 import { balHash, computeRoot, leafValue, verifyPath } from './merkle';
 import { p2 } from './poseidon2';
 import { closeMessage, interest, openMessage, posLeaf, stateRoot, PositionTerms } from './repo';
-import { daFold, depFold, sign, txMessage, verify, wdFold } from './schnorr';
+import { authMessage, daFold, depFold, sign, txMessage, verify, wdFold } from './schnorr';
 
 const PK7_X = hexToFr(vectors.pad.pk_x);
 const PK7_Y = hexToFr(vectors.pad.pk_y);
@@ -106,6 +106,11 @@ describe('fold chains vs meta.json', () => {
     const msg1 = txMessage(ALICE_PK_X, BOB_PK_X, 0n, 200n, 0n, false);
     const msg2 = txMessage(BOB_PK_X, addressToField(WD_DEST), 1n, 100n, 0n, true);
     expect(daFold(daFold(0n, msg1), msg2)).toBe(DA_COMMITMENT);
+  });
+  it('read-auth challenge matches the harness (issue #1 L12)', () => {
+    expect(frToHex32(authMessage(ALICE_PK_X, 1_700_000_000n))).toBe(
+      vectors.auth_msg_alice_1700000000,
+    );
   });
 });
 

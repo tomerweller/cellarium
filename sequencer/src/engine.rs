@@ -36,6 +36,14 @@ const OPEN_TS_SKEW_SECS: u64 = 60;
 /// so the interest mirror can never overflow for admitted terms.
 const MAX_TERM_BPS: u32 = 1_000_000;
 
+/// Freshness window for read-auth timestamps (issue #1 L12), both ways
+/// (client clocks skew in either direction).
+const AUTH_FRESH_SECS: u64 = 300;
+
+/// Withdrawal cap per batch — mirrors the contract's MAX_WITHDRAWALS, which
+/// is aligned with the circuit's T = 4 payment slots (issue #1 L14).
+const MAX_WITHDRAWALS: usize = 4;
+
 // ---------- wire/result types ----------
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -90,6 +98,20 @@ pub struct PositionInfo {
     pub haircut_bps: u32,
     pub open_ts: u64,
     pub maturity_ts: u64,
+}
+
+/// Read-auth proof for private listing endpoints (issue #1 L12), carried as
+/// query parameters: a Schnorr signature by the queried account's key over
+/// `P2([DOMAIN_AUTH, pk_x, ts], 3)`. `ts` must be within AUTH_FRESH_SECS of
+/// the sequencer clock (coarse replay bound; listings are reads).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct WireAuth {
+    pub ts: u64,
+    pub pk_y: String,
+    pub r_x: String,
+    pub r_y: String,
+    pub s_lo: String,
+    pub s_hi: String,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -153,6 +175,10 @@ pub enum ApiError {
     BadSignature,
     #[error("NONCE_MISMATCH: expected {expected}")]
     NonceMismatch { expected: u64 },
+    /// A DIFFERENT tx already occupies this (sender, nonce) slot (issue #1
+    /// L11) — resubmitting the identical tx returns the original receipt.
+    #[error("DUPLICATE_NONCE: a different tx is already pending at this nonce")]
+    DuplicateNonce,
     #[error("INSUFFICIENT_BALANCE: available {available}")]
     InsufficientBalance { available: u64 },
     #[error("RECIPIENT_UNKNOWN")]
@@ -191,8 +217,9 @@ pub enum Command {
     /// (intent id, counterparty signature)
     AcceptIntent(i64, WireAccept, oneshot::Sender<Result<TxReceipt, ApiError>>),
     SubmitClose(WireClose, oneshot::Sender<Result<TxReceipt, ApiError>>),
-    /// Intents where this pk is counterparty or initiator.
-    GetIntents(String, oneshot::Sender<Result<serde_json::Value, ApiError>>),
+    /// Intents where this pk is counterparty or initiator. Requires a
+    /// signed read-auth proof of key control (issue #1 L12).
+    GetIntents(String, WireAuth, oneshot::Sender<Result<serde_json::Value, ApiError>>),
     GetPositions(String, oneshot::Sender<Result<Vec<PositionInfo>, ApiError>>),
     GetAccount(String, oneshot::Sender<Result<AccountInfo, ApiError>>),
     GetStatus(oneshot::Sender<StatusInfo>),
@@ -201,6 +228,9 @@ pub enum Command {
     GetBatches(oneshot::Sender<Vec<serde_json::Value>>),
     /// From the watcher: newly observed L1 deposits (asset, seq, pk_x, amount).
     ObservedDeposits(Vec<(u32, u64, Fr, u64)>, oneshot::Sender<Result<(), ApiError>>),
+    /// From the watcher: current on-chain queue heads per asset. Pending
+    /// rows below a head were refunded on-chain (issue #1 M5).
+    ObservedQueueHeads([u64; 2], oneshot::Sender<Result<(), ApiError>>),
     /// From the batcher tick: build a batch if trigger conditions hold.
     /// Carries the current oracle price (fetched by the batcher) — bound as
     /// the 7th public input.
@@ -259,8 +289,8 @@ impl Engine {
             Command::SubmitClose(close, reply) => {
                 let _ = reply.send(self.submit_close(close));
             }
-            Command::GetIntents(pk_hex, reply) => {
-                let _ = reply.send(self.get_intents(&pk_hex));
+            Command::GetIntents(pk_hex, auth, reply) => {
+                let _ = reply.send(self.get_intents(&pk_hex, &auth));
             }
             Command::GetPositions(pk_hex, reply) => {
                 let _ = reply.send(self.get_positions(&pk_hex));
@@ -282,6 +312,9 @@ impl Engine {
             }
             Command::ObservedDeposits(deps, reply) => {
                 let _ = reply.send(self.observed_deposits(deps));
+            }
+            Command::ObservedQueueHeads(heads, reply) => {
+                let _ = reply.send(self.observed_queue_heads(heads));
             }
             Command::TryBuildBatch(price, reply) => {
                 let _ = reply.send(self.try_build_batch(price));
@@ -426,9 +459,22 @@ impl Engine {
             return Err(bad("amount"));
         }
 
-        // Idempotent resubmission: same (sender, nonce) returns the original.
-        if let Some((id, status)) = db::mempool_find(&self.conn, &from_pk_x, tx.nonce)? {
-            return Ok(TxReceipt { id, status });
+        // Idempotent resubmission: the IDENTICAL tx at (sender, nonce)
+        // returns the original receipt; a different payload at an occupied
+        // slot is an error, not a silent success (issue #1 L11).
+        if let Some(row) = db::mempool_find(&self.conn, &from_pk_x, tx.nonce)? {
+            let same_sig = [&row.sig_r_x, &row.sig_r_y, &row.sig_s_lo, &row.sig_s_hi]
+                .iter()
+                .zip([&tx.sig.r_x, &tx.sig.r_y, &tx.sig.s_lo, &tx.sig.s_hi])
+                .all(|(stored, given)| parse_fr(given).map(|g| g == **stored).unwrap_or(false));
+            if row.asset == tx.asset
+                && row.amount.to_string() == tx.amount
+                && row.is_withdraw == tx.is_withdraw
+                && same_sig
+            {
+                return Ok(TxReceipt { id: row.id, status: row.status });
+            }
+            return Err(ApiError::DuplicateNonce);
         }
 
         let (to_field, withdraw_dest) = if tx.is_withdraw {
@@ -521,10 +567,10 @@ impl Engine {
                         _ => account.coll,
                     };
                     if bal.checked_add(amount).is_none() {
-                        tracing::error!(asset, seq, "DEPOSIT JAM: balance would exceed u64; FIFO is stuck");
+                        tracing::error!(asset, seq, "DEPOSIT JAM: balance would exceed u64; FIFO is stuck until the head times out into refund_deposit (issue #1 M5)");
                     }
                 } else if self.state.accounts.free_index().is_none() {
-                    tracing::error!(asset, seq, "DEPOSIT JAM: tree full (256 accounts); FIFO is stuck");
+                    tracing::error!(asset, seq, "DEPOSIT JAM: tree full (256 accounts); FIFO is stuck until the head times out into refund_deposit (issue #1 M5)");
                 }
             }
         }
@@ -533,6 +579,21 @@ impl Engine {
         for asset in 0..2u32 {
             if let Some(seq) = max_seq[asset as usize] {
                 db::meta_set(&self.conn, &format!("dep_cursor_{asset}"), &(seq + 1).to_string())?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Retire pending deposit rows the chain already refunded (issue #1 M5).
+    /// With the operator pinned, only our own batches consume queue entries,
+    /// and those rows are 'batching'/'consumed' while a batch is in flight —
+    /// so a still-'pending' row below the on-chain head can only have been
+    /// refunded by the contract's refund_deposit path.
+    fn observed_queue_heads(&mut self, heads: [u64; 2]) -> Result<(), ApiError> {
+        for asset in 0..2u32 {
+            let n = db::deposits_mark_refunded_below(&self.conn, asset, heads[asset as usize])?;
+            if n > 0 {
+                tracing::warn!(asset, count = n, "marked deposits refunded (on-chain queue head advanced past pending rows)");
             }
         }
         Ok(())
@@ -714,8 +775,32 @@ impl Engine {
         Ok(TxReceipt { id: open_id, status: "pending".into() })
     }
 
-    fn get_intents(&self, pk_hex: &str) -> Result<serde_json::Value, ApiError> {
+    fn get_intents(&self, pk_hex: &str, auth: &WireAuth) -> Result<serde_json::Value, ApiError> {
         let pk_x = parse_fr(pk_hex).map_err(|e| ApiError::BadField(format!("pk_x: {e:?}")))?;
+        // Issue #1 L12: intents reveal counterparties and full term sheets,
+        // so listing requires proof of control of the queried key — a
+        // Schnorr signature over P2([DOMAIN_AUTH, pk_x, ts], 3) with a fresh
+        // ts (coarse replay bound; this is a read).
+        let now = db::now() as u64;
+        if auth.ts.abs_diff(now) > AUTH_FRESH_SECS {
+            return Err(ApiError::BadField(format!("auth ts: stale (now {now})")));
+        }
+        let bad = |field: &str| ApiError::BadField(field.to_string());
+        let pk_y = parse_fr(&auth.pk_y).map_err(|_| bad("auth pk_y"))?;
+        let sig = Signature::from_limbs(
+            parse_fr(&auth.r_x).map_err(|_| bad("auth r_x"))?,
+            parse_fr(&auth.r_y).map_err(|_| bad("auth r_y"))?,
+            parse_fr(&auth.s_lo).map_err(|_| bad("auth s_lo"))?,
+            parse_fr(&auth.s_hi).map_err(|_| bad("auth s_hi"))?,
+        )
+        .ok_or(ApiError::BadSignature)?;
+        let hasher = Hasher::new();
+        let msg = harness::batch::auth_message(&hasher, pk_x, auth.ts);
+        let pk = pk_from_coords(&pk_x, &pk_y).ok_or(ApiError::BadSignature)?;
+        if !verify(&hasher, &pk, msg, &sig) {
+            return Err(ApiError::BadSignature);
+        }
+
         let canonical = fr_hex(&pk_x);
         let incoming = db::intents_for_counterparty(&self.conn, &canonical)?;
         let outgoing = db::intents_by_initiator(&self.conn, &canonical)?;
@@ -881,7 +966,8 @@ impl Engine {
         let mut open_rows = db::opens_pending(&self.conn, self.cfg.open_slots)?;
         let mut candidates = db::mempool_pending(&self.conn, self.cfg.tx_slots * 4)?;
 
-        // Cap withdrawals per batch (contract MAX_WITHDRAWALS = 8).
+        // Cap withdrawals per batch (contract MAX_WITHDRAWALS = 4, aligned
+        // with the circuit's T = 4 payment slots — issue #1 L14).
         let mut txs: Vec<db::MempoolRow> = Vec::new();
         let mut withdrawals = 0usize;
         candidates.retain(|t| {
@@ -889,7 +975,7 @@ impl Engine {
                 return true;
             }
             if t.is_withdraw {
-                if withdrawals >= 8 {
+                if withdrawals >= MAX_WITHDRAWALS {
                     return true;
                 }
                 withdrawals += 1;
@@ -945,7 +1031,8 @@ impl Engine {
                     let count_coll = deposits.iter().filter(|d| d.asset == 1).count() as u32;
                     let blob = blob_json(batch_num, &witness, &deposits, &close_rows, &liq_rows, &open_rows, &txs);
                     let envelope = envelope_json(&witness, count_cash, count_coll, &txs);
-                    let prover_toml = harness::prover::to_repo_prover_toml(&witness);
+                    let prover_toml =
+                        harness::prover::to_repo_prover_toml(&witness, &self.instance_id());
                     db::insert_batch(
                         &self.conn,
                         batch_num,
@@ -955,6 +1042,8 @@ impl Engine {
                         count_coll,
                         batch_ts,
                         price,
+                        &witness.deposit_hash,
+                        &witness.withdraw_hash,
                         &witness.da_commitment,
                         &blob,
                         &envelope,
@@ -1129,6 +1218,13 @@ impl Engine {
         }
     }
 
+    /// instance_id = address_to_field(rollup contract) — the 8th public
+    /// input the contract derives from its own address (issue #1 L10).
+    fn instance_id(&self) -> Fr {
+        let hasher = Hasher::new();
+        address_to_field(&hasher, &self.cfg.contract_id)
+    }
+
     fn record_proof(
         &mut self,
         batch_num: u64,
@@ -1136,17 +1232,20 @@ impl Engine {
         public_inputs: Vec<u8>,
     ) -> Result<String, ApiError> {
         let batch = db::get_batch(&self.conn, batch_num)?.ok_or(ApiError::NotFound)?;
-        // Trust bb's public_inputs only if roots, da, batch_ts and price all
-        // match the persisted batch row and the blob is exactly 7 words —
-        // the fold hashes were computed by the same build we persisted.
+        // Trust bb's public_inputs only if ALL 8 words match the persisted
+        // batch row (the fold hashes are persisted at build time — issue #1
+        // L15 closed the 64..128 gap) plus the derived instance word.
         let ts_word = fr_from_u64(batch.batch_ts);
         let price_word = fr_from_u64(batch.price);
-        if public_inputs.len() != 224
+        if public_inputs.len() != 256
             || public_inputs[..32] != batch.old_root
             || public_inputs[32..64] != batch.new_root
+            || public_inputs[64..96] != batch.deposit_hash
+            || public_inputs[96..128] != batch.withdraw_hash
             || public_inputs[128..160] != batch.da_commitment
             || public_inputs[160..192] != ts_word
             || public_inputs[192..224] != price_word
+            || public_inputs[224..256] != self.instance_id()
         {
             return Err(ApiError::Internal("bb public_inputs mismatch".into()));
         }
@@ -1886,7 +1985,9 @@ mod engine_tests {
             cfg: Config {
                 rpc_url: String::new(),
                 network_passphrase: String::new(),
-                contract_id: "CTEST".into(),
+                // 56 chars so address_to_field (instance_id, issue #1 L10)
+                // accepts it like a real C… strkey.
+                contract_id: "C".repeat(56),
                 token_id: String::new(),
                 tust_id: String::new(),
                 sequencer_secret: String::new(),
@@ -1978,6 +2079,13 @@ mod engine_tests {
         // Idempotent resubmission: same (sender, nonce) returns the original id.
         let r2 = e.submit_tx(transfer(&alice, &bob, 600_000, 0)).unwrap();
         assert_eq!(r2.id, r1.id);
+
+        // A DIFFERENT tx at the occupied (sender, nonce) is an error, not a
+        // silent success answering with the original receipt (issue #1 L11).
+        match e.submit_tx(transfer(&alice, &bob, 600_001, 0)) {
+            Err(ApiError::DuplicateNonce) => {}
+            other => panic!("expected DuplicateNonce, got {other:?}"),
+        }
 
         // Nonce gap: pending shadow makes the expected nonce 1.
         match e.submit_tx(transfer(&alice, &bob, 1, 2)) {
@@ -2125,16 +2233,19 @@ mod engine_tests {
         assert_eq!(good_status, "batching");
     }
 
-    /// Build a valid 224-byte public-input blob for an inflight batch row.
+    /// Build a valid 256-byte public-input blob for an inflight batch row
+    /// (all 8 words, exactly as record_proof cross-checks them).
     fn pis_for(e: &Engine, batch_num: u64) -> Vec<u8> {
         let b = db::get_batch(&e.conn, batch_num).unwrap().unwrap();
-        let mut pis = Vec::with_capacity(224);
+        let mut pis = Vec::with_capacity(256);
         pis.extend_from_slice(&b.old_root);
         pis.extend_from_slice(&b.new_root);
-        pis.extend_from_slice(&[0u8; 64]); // deposit/withdraw folds: not re-checked here
+        pis.extend_from_slice(&b.deposit_hash);
+        pis.extend_from_slice(&b.withdraw_hash);
         pis.extend_from_slice(&b.da_commitment);
         pis.extend_from_slice(&fr_from_u64(b.batch_ts));
         pis.extend_from_slice(&fr_from_u64(b.price));
+        pis.extend_from_slice(&e.instance_id());
         pis
     }
 
@@ -2339,5 +2450,86 @@ mod engine_tests {
         assert!(boot.chain_synced);
         assert!(db::inflight_batch(&e.conn).unwrap().is_none(), "interrupted prove cleared");
         assert_eq!(db::mempool_count_pending(&e.conn).unwrap(), 1, "inputs requeued");
+    }
+
+    /// Issue #1 M5: when the on-chain queue head advances past rows that are
+    /// still 'pending' locally, the contract refunded them (only our own
+    /// batches consume entries, and those rows are 'batching'/'consumed') —
+    /// they must leave the pending set so builds stop including them.
+    #[test]
+    fn refunded_deposits_are_retired() {
+        let (carol, dave) = (kp(303), kp(404));
+        let mut e = engine(4, 4, 3600);
+        e.observed_deposits(vec![
+            (0, 0, carol.pk_x(), 700),
+            (0, 1, dave.pk_x(), 800),
+            (1, 0, dave.pk_x(), 900),
+        ])
+        .unwrap();
+        assert_eq!(db::deposits_count_pending(&e.conn).unwrap(), 3);
+
+        // Cash head advanced past seq 0 (refunded); coll head untouched.
+        e.observed_queue_heads([1, 0]).unwrap();
+        assert_eq!(db::deposits_count_pending(&e.conn).unwrap(), 2);
+
+        // 'batching' rows are NOT touched: a head advanced by our own
+        // in-flight batch must not retire its inputs.
+        db::deposits_set_status(&e.conn, &[(0, 1)], "batching", Some(1)).unwrap();
+        e.observed_queue_heads([2, 0]).unwrap();
+        let rows = db::deposits_pending(&e.conn, 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].asset, rows[0].seq), (1, 0));
+    }
+
+    /// Issue #1 L12: intent listings require a fresh signature by the
+    /// queried key; garbage or stale auth is rejected.
+    #[test]
+    fn intent_listing_requires_auth() {
+        let e = engine(2, 4, 3600);
+        let alice = kp(101);
+        let hasher = Hasher::new();
+        let now = db::now() as u64;
+
+        let auth_for = |ts: u64| {
+            let msg = harness::batch::auth_message(&hasher, alice.pk_x(), ts);
+            let sig = sign_with_nonce(&hasher, &alice, msg, ark_grumpkin::Fr::from(4242u64));
+            let (lo, hi) = sig.s_limbs();
+            WireAuth {
+                ts,
+                pk_y: fr_hex(&alice.pk_y()),
+                r_x: fr_hex(&sig.r_x),
+                r_y: fr_hex(&sig.r_y),
+                s_lo: fr_hex(&lo),
+                s_hi: fr_hex(&hi),
+            }
+        };
+
+        // Valid, fresh auth lists (empty) intents.
+        let ok = e.get_intents(&fr_hex(&alice.pk_x()), &auth_for(now)).unwrap();
+        assert!(ok["incoming"].as_array().unwrap().is_empty());
+
+        // Stale timestamp rejected even with a valid signature over it.
+        match e.get_intents(&fr_hex(&alice.pk_x()), &auth_for(now - 3600)) {
+            Err(ApiError::BadField(f)) => assert!(f.contains("auth ts")),
+            other => panic!("expected stale-ts rejection, got {other:?}"),
+        }
+
+        // A signature over the right message by the WRONG key is rejected.
+        let mallory = kp(999);
+        let msg = harness::batch::auth_message(&hasher, alice.pk_x(), now);
+        let sig = sign_with_nonce(&hasher, &mallory, msg, ark_grumpkin::Fr::from(77u64));
+        let (lo, hi) = sig.s_limbs();
+        let forged = WireAuth {
+            ts: now,
+            pk_y: fr_hex(&alice.pk_y()),
+            r_x: fr_hex(&sig.r_x),
+            r_y: fr_hex(&sig.r_y),
+            s_lo: fr_hex(&lo),
+            s_hi: fr_hex(&hi),
+        };
+        match e.get_intents(&fr_hex(&alice.pk_x()), &forged) {
+            Err(ApiError::BadSignature) => {}
+            other => panic!("expected BadSignature, got {other:?}"),
+        }
     }
 }

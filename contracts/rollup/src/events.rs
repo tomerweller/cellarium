@@ -1,4 +1,4 @@
-use soroban_sdk::{contractevent, BytesN};
+use soroban_sdk::{contractevent, Address, BytesN};
 
 #[contractevent(topics = ["deposit"], data_format = "map")]
 pub struct Deposit<'a> {
@@ -6,6 +6,18 @@ pub struct Deposit<'a> {
     pub seq: &'a u64,
     pub asset: &'a u32,
     pub pk_x: &'a BytesN<32>,
+    pub amount: &'a i128,
+}
+
+/// A queue-head entry refunded after the timeout (issue #1 M5): the FIFO
+/// prefix is mandatory, so an unconsumable head would otherwise block every
+/// deposit behind it forever with no way to recover the L1 funds.
+#[contractevent(topics = ["refund"], data_format = "map")]
+pub struct Refund<'a> {
+    #[topic]
+    pub seq: &'a u64,
+    pub asset: &'a u32,
+    pub to: &'a Address,
     pub amount: &'a i128,
 }
 

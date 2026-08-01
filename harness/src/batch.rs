@@ -21,6 +21,9 @@ pub const DOMAIN_TX: u64 = 2;
 pub const DOMAIN_DA: u64 = 7;
 pub const DOMAIN_DEP2: u64 = 11;
 pub const DOMAIN_WD2: u64 = 12;
+/// Read-auth challenge for private sequencer queries (issue #1 L12); never
+/// used in-circuit — only the wallet signs it and the sequencer verifies it.
+pub const DOMAIN_AUTH: u64 = 13;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
@@ -153,6 +156,13 @@ pub fn tx_message(
         fr_from_u64(nonce),
         fr_from_u64(is_withdraw as u64),
     ])
+}
+
+/// Read-auth message (issue #1 L12): proves control of `pk_x` for
+/// listing endpoints. `msg = P2([DOMAIN_AUTH, pk_x, ts], 3)`; the sequencer
+/// accepts |now - ts| <= its freshness window.
+pub fn auth_message(hasher: &Hasher, pk_x: Fr, ts: u64) -> Fr {
+    hasher.hash(&[fr_from_u64(DOMAIN_AUTH), pk_x, fr_from_u64(ts)])
 }
 
 fn pad_pk_x_bytes() -> Fr {

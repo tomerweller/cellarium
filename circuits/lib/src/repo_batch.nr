@@ -10,7 +10,7 @@
 // deposits are reconstructible from the on-chain queues).
 use crate::repo::{apply_open, OpenWitness};
 use crate::settle::{apply_close, apply_liq, CloseWitness, LiqWitness};
-use crate::tx::{apply_deposit, apply_tx, DepositWitness, TxWitness};
+use crate::tx::{apply_deposit, apply_tx, assert_u64, DepositWitness, TxWitness};
 use dep::poseidon::poseidon2::Poseidon2;
 
 pub fn state_root(account_root: Field, position_root: Field) -> Field {
@@ -35,6 +35,13 @@ pub fn batch_repo<let D: u32, let C: u32, let L: u32, let O: u32, let T: u32>(
     txs: [TxWitness; T],
 ) {
     assert(state_root(old_acct_root, old_pos_root) == old_state_root);
+
+    // Issue #1 L8: bind batch_ts and price to u64 unconditionally. The
+    // op-level checks only fire when an open/close/liq is active, which left
+    // both PIs unconstrained in payment-only batches (the contract already
+    // bounds them, but the circuit should not rely on that).
+    assert_u64(batch_ts);
+    assert_u64(price);
 
     let mut acct_root = old_acct_root;
     let mut pos_root = old_pos_root;

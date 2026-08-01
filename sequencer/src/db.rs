@@ -9,7 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 pub type DbResult<T> = Result<T, rusqlite::Error>;
 
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 pub fn open(path: &std::path::Path) -> DbResult<Connection> {
     let conn = Connection::open(path)?;
@@ -168,6 +168,8 @@ fn migrate(conn: &Connection) -> DbResult<()> {
           deposit_count_coll INTEGER NOT NULL,
           batch_ts      INTEGER NOT NULL,
           price         TEXT NOT NULL,
+          deposit_hash  TEXT NOT NULL,
+          withdraw_hash TEXT NOT NULL,
           da_commitment TEXT NOT NULL,
           blob_json     TEXT NOT NULL,
           envelope_json TEXT NOT NULL,
@@ -189,7 +191,7 @@ fn migrate(conn: &Connection) -> DbResult<()> {
           ts INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS history_pk ON history(pk_x, id DESC);
-        PRAGMA user_version = 4;
+        PRAGMA user_version = 5;
         COMMIT;
         "#,
     )
@@ -343,11 +345,14 @@ pub fn insert_mempool(
     Ok(conn.last_insert_rowid())
 }
 
-pub fn mempool_find(conn: &Connection, from_pk_x: &Fr, nonce: u64) -> DbResult<Option<(i64, String)>> {
+/// The full row at (sender, nonce), if any — the caller compares payloads so
+/// a DIFFERENT tx reusing the slot is rejected instead of silently answered
+/// with the original receipt (issue #1 L11).
+pub fn mempool_find(conn: &Connection, from_pk_x: &Fr, nonce: u64) -> DbResult<Option<MempoolRow>> {
     conn.query_row(
-        "SELECT id, status FROM mempool WHERE from_pk_x = ?1 AND nonce = ?2",
+        &format!("SELECT {MEMPOOL_COLS} FROM mempool WHERE from_pk_x = ?1 AND nonce = ?2"),
         params![fr_hex(from_pk_x), nonce as i64],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| mempool_row(r),
     )
     .optional()
 }
@@ -463,6 +468,19 @@ pub fn deposits_oldest_pending_age(conn: &Connection) -> DbResult<Option<i64>> {
     .map(|min| min.map(|m| now() - m))
 }
 
+/// Mark still-pending entries below the on-chain queue head as refunded
+/// (issue #1 M5): with the operator pinned, only our own batches consume
+/// entries — and those rows are 'batching'/'consumed' by then — so a pending
+/// row falling below the head can only mean the contract's refund_deposit
+/// path returned it to the depositor. Returns how many rows were marked.
+pub fn deposits_mark_refunded_below(conn: &Connection, asset: u32, head: u64) -> DbResult<usize> {
+    conn.execute(
+        "UPDATE deposits SET status = 'refunded'
+         WHERE asset = ?1 AND seq < ?2 AND status = 'pending'",
+        params![asset as i64, head as i64],
+    )
+}
+
 pub fn deposits_set_status(conn: &Connection, keys: &[(u32, u64)], status: &str, batch_num: Option<u64>) -> DbResult<()> {
     for (asset, seq) in keys {
         conn.execute(
@@ -484,6 +502,8 @@ pub struct BatchRow {
     pub deposit_count_coll: u32,
     pub batch_ts: u64,
     pub price: u64,
+    pub deposit_hash: Fr,
+    pub withdraw_hash: Fr,
     pub da_commitment: Fr,
     pub blob_json: String,
     pub envelope_json: String,
@@ -503,20 +523,22 @@ fn batch_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<BatchRow> {
         deposit_count_coll: r.get::<_, i64>(4)? as u32,
         batch_ts: r.get::<_, i64>(5)? as u64,
         price: r.get::<_, String>(6)?.parse().expect("db price corrupt"),
-        da_commitment: parse_fr(&r.get::<_, String>(7)?).expect("db da corrupt"),
-        blob_json: r.get(8)?,
-        envelope_json: r.get(9)?,
-        proof: r.get(10)?,
-        status: r.get(11)?,
-        tx_hash: r.get(12)?,
-        created_at: r.get(13)?,
-        confirmed_at: r.get(14)?,
+        deposit_hash: parse_fr(&r.get::<_, String>(7)?).expect("db deposit_hash corrupt"),
+        withdraw_hash: parse_fr(&r.get::<_, String>(8)?).expect("db withdraw_hash corrupt"),
+        da_commitment: parse_fr(&r.get::<_, String>(9)?).expect("db da corrupt"),
+        blob_json: r.get(10)?,
+        envelope_json: r.get(11)?,
+        proof: r.get(12)?,
+        status: r.get(13)?,
+        tx_hash: r.get(14)?,
+        created_at: r.get(15)?,
+        confirmed_at: r.get(16)?,
     })
 }
 
 const BATCH_COLS: &str = "batch_num, old_root, new_root, deposit_count_cash, deposit_count_coll, \
-                          batch_ts, price, da_commitment, blob_json, envelope_json, proof, status, \
-                          tx_hash, created_at, confirmed_at";
+                          batch_ts, price, deposit_hash, withdraw_hash, da_commitment, blob_json, \
+                          envelope_json, proof, status, tx_hash, created_at, confirmed_at";
 
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
@@ -529,14 +551,17 @@ pub fn insert_batch(
     deposit_count_coll: u32,
     batch_ts: u64,
     price: u64,
+    deposit_hash: &Fr,
+    withdraw_hash: &Fr,
     da_commitment: &Fr,
     blob_json: &str,
     envelope_json: &str,
 ) -> DbResult<()> {
     conn.execute(
         "INSERT INTO batches(batch_num, old_root, new_root, deposit_count_cash, deposit_count_coll,
-                             batch_ts, price, da_commitment, blob_json, envelope_json, status, created_at)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,'proving',?11)",
+                             batch_ts, price, deposit_hash, withdraw_hash, da_commitment, blob_json,
+                             envelope_json, status, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'proving',?13)",
         params![
             batch_num as i64,
             fr_hex(old_root),
@@ -545,6 +570,8 @@ pub fn insert_batch(
             deposit_count_coll as i64,
             batch_ts as i64,
             price.to_string(),
+            fr_hex(deposit_hash),
+            fr_hex(withdraw_hash),
             fr_hex(da_commitment),
             blob_json,
             envelope_json,

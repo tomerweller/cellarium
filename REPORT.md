@@ -117,6 +117,14 @@ testnet (Protocol 27).
 |---|---|---|---|---|---|
 | batch_repo @M2 | D=4 O=2 T=4 | 90,334 (2^17 domain) | — | 0.54 s | ~380 MB |
 | batch_repo @M3+ | D=4 C=2 L=2 O=2 T=4 | 132,327 (2^18 domain) | 23,644 | 0.80 s | 752 MB |
+| batch_repo @issue-1 remediation | D=4 C=2 L=2 O=2 T=4 + 8th PI (instance_id) + L8/L9 range checks | 133,535 (2^18 domain) | 24,572 | 0.50 s (18 threads) | 754 MB |
+| batch_repo, ZK flavor (measured for issue #1 M6; NOT deployable) | same | same | same | 0.64 s (18 threads) | 773 MB |
+
+The ZK-flavor row exists to answer M6: proving cost is affordable (+~30%
+wall, +2% RSS), but `--zk` emits a 507-field / 16,224-byte proof the pinned
+ultrahonk-soroban-verifier (456 fields / 14,592 bytes, non-ZK only) cannot
+verify — flipping the flavor is blocked on a ZK-capable verifier crate, not
+on proving cost.
 
 Sig-verifications dominate: T + 2·O + C = 10 Grumpkin MSM pairs per batch,
 plus ~34 Merkle path updates across two depth-8 trees. Prove time stays ~4×

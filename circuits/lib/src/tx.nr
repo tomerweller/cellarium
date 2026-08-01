@@ -184,6 +184,9 @@ pub fn apply_tx(root: Field, wd_acc: Field, da_acc: Field, t: TxWitness) -> (Fie
         // flip sk -> -sk when raw y is odd (harness + wallet do this).
         assert(is_even_y(t.from_pk_y));
     }
+    // Issue #1 L9: the incremented nonce must stay in u64 (wrap to 0 would
+    // re-enable replay of the account's oldest signatures).
+    assert_u64(select(t.is_active, t.from_nonce, 0));
     let old_sender = leaf_value(Account {
         pk_x: t.from_pk_x,
         cash: t.from_cash,

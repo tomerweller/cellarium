@@ -131,6 +131,14 @@ fn wd_addr() -> String {
     stellar_strkey::Contract([7u8; 32]).to_string()
 }
 
+/// The rollup contract address the batch_repo fixture is bound to (8th
+/// public input, issue #1 L10). Contract tests must register the rollup AT
+/// this address (`env.register_at`) so the fixture proof's instance_id
+/// matches what submit_batch derives from env.current_contract_address().
+fn fixture_instance_addr() -> String {
+    stellar_strkey::Contract([9u8; 32]).to_string()
+}
+
 fn demo_batch() {
     use harness::batch::{build_batch, make_signed_tx, DepositRequest};
     use harness::l1::address_to_field;
@@ -281,11 +289,16 @@ fn demo_repo_batch() {
     )
     .expect("demo repo batch must build");
 
+    let instance_addr = fixture_instance_addr();
+    let instance_id = address_to_field(&hasher, &instance_addr);
+
     println!("old_state_root = {}", to_hex(&witness.old_state_root));
     println!("new_state_root = {}", to_hex(&witness.new_state_root));
     println!("da_commitment  = {}", to_hex(&witness.da_commitment));
 
     let meta = serde_json::json!({
+        "instance_addr": instance_addr,
+        "instance_id": to_hex(&instance_id),
         "old_state_root": to_hex(&witness.old_state_root),
         "new_state_root": to_hex(&witness.new_state_root),
         "deposit_hash": to_hex(&witness.deposit_hash),
@@ -316,7 +329,7 @@ fn demo_repo_batch() {
     )
     .unwrap();
 
-    let toml = prover::to_repo_prover_toml(&witness);
+    let toml = prover::to_repo_prover_toml(&witness, &instance_id);
     prover::prove("batch_repo", &toml).expect("prove pipeline failed");
 
     let proof = std::fs::read(fixture_dir.join("proof")).unwrap();
@@ -484,6 +497,8 @@ fn vectors_json() {
     )
     .expect("demo scenario must build");
     let msg1 = harness::batch::tx_message(&hasher, alice.pk_x(), bob.pk_x(), Asset::Cash, 200, 0, false);
+    // Read-auth challenge (issue #1 L12): wallet signs, sequencer verifies.
+    let auth_msg = harness::batch::auth_message(&hasher, alice.pk_x(), 1_700_000_000);
 
     let json = serde_json::json!({
         "_generated": "cargo run -p harness -- vectors-json (do not edit; scripts/check_vectors.sh gates drift)",
@@ -525,6 +540,7 @@ fn vectors_json() {
         "wd_dest": wd_dest,
         "wd_dest_field": to_hex(&wd_field),
         "tx_message_alice_bob_cash_200_0": to_hex(&msg1),
+        "auth_msg_alice_1700000000": to_hex(&auth_msg),
         "demo": {
             "old_root": to_hex(&w.old_root),
             "new_root": to_hex(&w.new_root),

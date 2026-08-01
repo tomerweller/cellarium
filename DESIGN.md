@@ -55,6 +55,7 @@ Domain separators (Fr constants):
 | `DOMAIN_CLOSE` | 10 | repo-close signing message (M3) |
 | `DOMAIN_DEP2` | 11 | deposit fold, asset-bound (M1) |
 | `DOMAIN_WD2` | 12 | withdrawal fold, asset-bound (M1) |
+| `DOMAIN_AUTH` | 13 | read-auth challenge for private sequencer listings (issue #1 L12; wallet + sequencer only, never in-circuit) |
 
 ## State
 
@@ -183,13 +184,13 @@ Schnorr over Grumpkin (hand-rolled; std::schnorr no longer exists):
 ```
 main(old_state_root: pub, new_state_root: pub,
      deposit_hash: pub, withdraw_hash: pub, da_commitment: pub,
-     batch_ts: pub, price: pub,
+     batch_ts: pub, price: pub, instance_id: pub,
      old_acct_root, old_pos_root,           // private openings of state_root
      deposits: [DepositWitness; D], closes: [CloseWitness; C],
      liqs: [LiqWitness; L], opens: [OpenWitness; O], txs: [TxWitness; T])
 ```
 
-Exactly 7 public inputs (224-byte PI blob):
+Exactly 8 public inputs (256-byte PI blob):
 
 - `old_state_root` — contract storage.
 - `new_state_root` — envelope, becomes storage after verification.
@@ -198,7 +199,18 @@ Exactly 7 public inputs (224-byte PI blob):
   6.1.3). Bound from M2, constrained by op logic from M3.
 - `price` — tUST/XLM as XLM-per-tUST × 1e7, read by submit_batch from the
   oracle inside the same invocation; staleness > 300s rejects the batch.
-  Bound from M2, constrained by margin logic from M4.
+  Bound from M2, constrained by margin logic from M4. Both `batch_ts` and
+  `price` are additionally `assert_u64`'d unconditionally in `batch_repo`
+  (issue #1 L8) so payment-only batches don't leave them unconstrained
+  in-circuit.
+- `instance_id` — `address_to_field(rollup contract address)`, appended by
+  the contract from `env.current_contract_address()` (issue #1 L10). Needs
+  no gates: every public input enters the verifier transcript and
+  public-input delta, so a proof for one deployment fails verification on
+  any other even with an identical VK and genesis root. The sequencer
+  derives the same value from its configured CONTRACT_ID; the batch_repo
+  fixture pins a fixed instance address (`meta.json .instance_addr`) that
+  contract tests `register_at`.
 - `deposit_hash` — fold over the batch's FIFO deposit-queue prefixes, **cash
   queue first, then coll queue** (two on-chain queues since M1):
   `acc' = Poseidon2([DOMAIN_DEP2, acc, Poseidon2([pk_x, asset, amount])])`,
@@ -234,7 +246,14 @@ the matching custody token.
 - The tx blob itself never touches the chain (validium): it is stored in the
   sequencer's SQLite and served at `GET /da/:batch_num`, bound by
   `da_commitment` (see above).
-- Withdrawals executed inline, capped ≤ 8/batch.
+- Withdrawals executed inline, capped ≤ 4/batch (aligned with the circuit's
+  T = 4 payment slots — issue #1 L14).
+- Deposit-queue entries record the L1 depositor and enqueue timestamp; a
+  head entry unconsumed for 24h (`REFUND_DELAY_SECS`) can be refunded to its
+  depositor by anyone via `refund_deposit(asset)` — head-only, so the
+  provable FIFO prefix never contains tombstones (issue #1 M5). The
+  sequencer's watcher polls `dep_head` and retires still-pending local rows
+  the chain has refunded.
 
 ## Batching cadence
 
@@ -264,9 +283,11 @@ validity is trustless within that single-operator model. Data
 availability is trusted to the sequencer operator: if the operator withholds
 a blob, users cannot recompute Merkle paths for newer roots and the system
 freezes (funds cannot be stolen). The mock oracle is admin-set: margining is
-only as honest as its feed. Intent listings are counterparty-filtered but
-unauthenticated (PLAN 6.2). Production hardening path: DAC signatures over
-`da_commitment`, a real oracle (Reflector), forced exits.
+only as honest as its feed. Intent listings are counterparty-filtered and
+require a signed read-auth challenge — `P2([DOMAIN_AUTH, pk_x, ts], 3)`
+signed by the queried key, ts within ±300s (issue #1 L12; coarse replay
+bound, acceptable for a read). Production hardening path: DAC signatures
+over `da_commitment`, a real oracle (Reflector), forced exits.
 
 ## Known spike caveats (production deltas)
 
@@ -277,13 +298,18 @@ with the same `pk_x` without a sparse/nullifier tree — mitigated for now by
 the operator-only submit gate, issue #1 H1); VK rotation/upgrade
 path; sequencer decentralization; SAC clawback/auth-flag vetting for the
 custody asset (including that it cannot mint past `u64::MAX` base units —
-the balance-overflow safety argument depends on it); cross-instance proof
-replay (no `addr_f` binding — old_root match makes replay a non-issue within
-an instance); deposit-queue capacity jam (issue #1 M5: accounts are never
-evicted, so a deposit to a fresh `pk_x` with the 256-slot tree full is
-unconsumable and blocks the mandatory FIFO prefix behind it forever — L1
-funds sit in the contract with no refund/cancel path; production needs
-deposit gating, a timeout refund, or zero-balance eviction); witness privacy
-against proof-observers (issue #1 M6: the pinned proof flavor is non-ZK, so
-"cannot see sizes/rates" is heuristic for anyone holding the proof bytes —
-measure `bb prove --zk` cost if a cryptographic guarantee is needed).
+the balance-overflow safety argument depends on it); deposit-queue capacity
+(issue #1 M5, mitigated: accounts are still never evicted, so a deposit to a
+fresh `pk_x` with the 256-slot tree full is unconsumable — but since the
+refund path landed the jam is bounded at 24h: `refund_deposit` returns the
+timed-out head to its depositor and unblocks the FIFO; production would add
+deposit gating or zero-balance eviction so honest deposits never wait out
+the timeout); witness privacy against proof-observers (issue #1 M6,
+measured: `bb prove --zk` on batch_repo costs 0.64s wall / 773 MB peak RSS
+vs 0.50s / 754 MB non-ZK on the M-series dev machine — affordable — but the
+ZK flavor emits a 507-field, 16,224-byte proof that the pinned
+ultrahonk-soroban-verifier (456-field / 14,592-byte, non-ZK only) cannot
+verify, so enabling it requires a ZK-capable verifier crate; until then
+"cannot see sizes/rates" remains heuristic for anyone holding the proof
+bytes). Cross-instance proof replay is closed: the 8th public input binds
+`address_to_field(contract)` (issue #1 L10).

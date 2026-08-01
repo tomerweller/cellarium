@@ -1,6 +1,7 @@
 {
   "_generated": "cargo run -p harness -- vectors-json (do not edit; scripts/check_vectors.sh gates drift)",
   "alice_pk_x": "0x1f2cbd75183a0cced1f2b4d1121a647b3b421baed26e463b2565b7972ae1a83c",
+  "auth_msg_alice_1700000000": "0x2f6d59cae089710eebd4fb88eaca32592371a762725c13dfe473b0c58db930da",
   "bal_hash_100_40": "0x20e1be360698358680d08b979866b37bac666f5d35577df26f51e24487839c65",
   "bob_pk_x": "0x13d84dfee2bd99f26530c590cd8c011979328f1fa149234b19fea91510f94ebb",
   "da_fold_0_42": "0x04753fb4f4ed6d02388a18f3b84e56dfc5b22dcd77ec8acf81ca9257bdfae3e3",

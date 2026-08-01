@@ -14,6 +14,8 @@
       "pk_x": "0x13d84dfee2bd99f26530c590cd8c011979328f1fa149234b19fea91510f94ebb"
     }
   ],
+  "instance_addr": "CAEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQSCIJBEEQTD2L",
+  "instance_id": "0x2d7b9eb1820fae0b1daca7f609b18f6e99b8cf041b6afc131a16bbe92b663c6f",
   "new_state_root": "0x05713150e896d90496e41afe821e596fe7d0b94c9b162325bb6ba227e5c22915",
   "old_state_root": "0x1849b85f3c693693e732dfc4577217acc18295193bede09ce8b97ad910310972",
   "open": {

@@ -4,7 +4,7 @@
 import { evenYFromX, pkFromSk } from '../crypto/grumpkin';
 import { frToHex32, hexToFr } from '../crypto/fields';
 import { closeMessage, openMessage, PositionTerms } from '../crypto/repo';
-import { sign, verify } from '../crypto/schnorr';
+import { authMessage, sign, verify } from '../crypto/schnorr';
 import { accountOrNull, api, Intent, Position, WireSig } from './sequencer';
 
 function wireSig(sig: ReturnType<typeof sign>): WireSig {
@@ -14,6 +14,17 @@ function wireSig(sig: ReturnType<typeof sign>): WireSig {
     s_lo: frToHex32(sig.s_lo),
     s_hi: frToHex32(sig.s_hi),
   };
+}
+
+/**
+ * Fetch intents for the wallet's own key, proving control of it with a
+ * fresh signed challenge (issue #1 L12: listings are no longer public).
+ */
+export function listIntents(sk: bigint): Promise<{ incoming: Intent[]; outgoing: Intent[] }> {
+  const me = pkFromSk(sk);
+  const ts = Math.floor(Date.now() / 1000);
+  const sig = sign(sk, authMessage(me.x, BigInt(ts)));
+  return api.intents(frToHex32(me.x), { ts, pk_y: frToHex32(me.y), sig: wireSig(sig) });
 }
 
 export interface NewIntent {

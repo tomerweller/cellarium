@@ -5,7 +5,7 @@
 //   s = (k + e*sk) mod n;  wire form: (r_x, r_y, s_lo, s_hi) 128-bit limbs.
 import { Fr, N_GRUMPKIN, randScalar } from './fields';
 import { Grumpkin, mulBase, pkFromSk, pointFromAffine } from './grumpkin';
-import { DOMAIN_DA, DOMAIN_DEP2, DOMAIN_SIG, DOMAIN_TX, DOMAIN_WD2, p2 } from './poseidon2';
+import { DOMAIN_AUTH, DOMAIN_DA, DOMAIN_DEP2, DOMAIN_SIG, DOMAIN_TX, DOMAIN_WD2, p2 } from './poseidon2';
 
 export interface Signature {
   r_x: Fr;
@@ -26,6 +26,14 @@ export function txMessage(
   isWithdraw: boolean,
 ): Fr {
   return p2([DOMAIN_TX, fromPkX, toField, asset, amount, nonce, isWithdraw ? 1n : 0n]);
+}
+
+/**
+ * Read-auth challenge for private sequencer listings (issue #1 L12):
+ * msg = P2([DOMAIN_AUTH, pkX, ts], 3). Mirrors harness auth_message.
+ */
+export function authMessage(pkX: Fr, ts: bigint): Fr {
+  return p2([DOMAIN_AUTH, pkX, ts]);
 }
 
 /** DA-commitment fold step (DOMAIN_DA, arity 3). */

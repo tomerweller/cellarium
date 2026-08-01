@@ -14,3 +14,5 @@ export const DOMAIN_ADDR = 6n;
 export const DOMAIN_DA = 7n;
 export const DOMAIN_DEP2 = 11n;
 export const DOMAIN_WD2 = 12n;
+/** Read-auth challenge for private sequencer listings (issue #1 L12). */
+export const DOMAIN_AUTH = 13n;

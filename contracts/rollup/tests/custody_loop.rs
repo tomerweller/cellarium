@@ -70,7 +70,13 @@ fn setup() -> Setup<'static> {
     let vk = Bytes::from_slice(&env, VK);
     let genesis = BytesN::from_array(&env, &hex32(meta["old_state_root"].as_str().unwrap()));
     let operator = Address::generate(&env);
-    let rollup_id = env.register(
+    // The fixture proof binds instance_id = address_to_field(rollup) as its
+    // 8th public input (issue #1 L10), so the contract must live at the
+    // exact address the fixture was generated for.
+    let instance_addr =
+        Address::from_string(&SString::from_str(&env, meta["instance_addr"].as_str().unwrap()));
+    let rollup_id = env.register_at(
+        &instance_addr,
         RollupContract,
         (cash_sac.address(), coll_sac.address(), oracle_id, operator.clone(), vk, genesis),
     );
@@ -159,9 +165,10 @@ fn full_repo_loop() {
 
 #[test]
 fn fixture_public_inputs_match_contract_assembly() {
-    // 7 PIs = 224 bytes; roots + batch_ts + price words must match meta.
+    // 8 PIs = 256 bytes; roots + batch_ts + price + instance words must
+    // match meta (instance_id — issue #1 L10).
     let meta: serde_json::Value = serde_json::from_str(META).unwrap();
-    assert_eq!(PUBLIC_INPUTS.len(), 224);
+    assert_eq!(PUBLIC_INPUTS.len(), 256);
     assert_eq!(&PUBLIC_INPUTS[..32], &hex32(meta["old_state_root"].as_str().unwrap()));
     assert_eq!(&PUBLIC_INPUTS[32..64], &hex32(meta["new_state_root"].as_str().unwrap()));
     // batch_ts word (6th PI).
@@ -173,6 +180,16 @@ fn fixture_public_inputs_match_contract_assembly() {
     let mut price_word = [0u8; 32];
     price_word[16..].copy_from_slice(&price.to_be_bytes());
     assert_eq!(&PUBLIC_INPUTS[192..224], &price_word);
+    // instance word (8th PI) = address_to_field(fixture rollup address);
+    // the contract derives the same from env.current_contract_address().
+    assert_eq!(&PUBLIC_INPUTS[224..256], &hex32(meta["instance_id"].as_str().unwrap()));
+    let env = Env::default();
+    let addr =
+        Address::from_string(&SString::from_str(&env, meta["instance_addr"].as_str().unwrap()));
+    assert_eq!(
+        rollup::publics::address_to_field(&env, &addr),
+        BytesN::from_array(&env, &hex32(meta["instance_id"].as_str().unwrap()))
+    );
 }
 
 #[test]

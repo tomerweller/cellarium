@@ -30,6 +30,11 @@ pub enum DataKey {
 pub struct PendingDeposit {
     pub pk_x: BytesN<32>,
     pub amount: i128,
+    /// L1 depositor, kept so a queue entry that can never be consumed (e.g.
+    /// tree-full jam, issue #1 M5) can be refunded after a timeout.
+    pub from: Address,
+    /// Ledger timestamp at enqueue; gates the refund timeout.
+    pub enqueued_at: u64,
 }
 
 pub fn set_token(env: &Env, asset: u32, token: &Address) {

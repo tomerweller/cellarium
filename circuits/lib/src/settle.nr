@@ -137,6 +137,8 @@ pub fn apply_close(
         assert(c.borrower_pk_x != PAD_PK_X);
         assert_u64(c.maturity_ts - batch_ts);
         assert_u64(elapsed);
+        // Issue #1 L9: the incremented borrower nonce must stay in u64.
+        assert_u64(c.borrower_nonce);
         constrain_interest(c.cash, c.rate_bps, elapsed, c.interest);
     }
     let repay = c.cash + select(c.is_active, c.interest, 0);

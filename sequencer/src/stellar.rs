@@ -34,6 +34,10 @@ pub trait StellarClient: Send + Sync {
     /// caller's job.
     fn refresh_oracle_price(&self, price: u64) -> Result<(), ChainError>;
     fn dep_tail(&self, asset: u32) -> Result<u64, ChainError>;
+    /// First unconsumed queue seq. The watcher reports it so the engine can
+    /// mark refunded entries (contract refund_deposit advances the head
+    /// without a batch — issue #1 M5).
+    fn dep_head(&self, asset: u32) -> Result<u64, ChainError>;
     fn get_pending_deposit(&self, asset: u32, seq: u64) -> Result<(Fr, u64), ChainError>;
     /// Sign + send submit_batch with the envelope JSON; returns when the CLI
     /// exits (success implies the tx was applied on-chain).
@@ -210,6 +214,13 @@ impl StellarClient for CliClient {
         out.trim_matches('"')
             .parse()
             .map_err(|_| ChainError::Parse(format!("dep_tail({asset}) -> {out:?}")))
+    }
+
+    fn dep_head(&self, asset: u32) -> Result<u64, ChainError> {
+        let out = self.invoke(false, &["dep_head", "--asset", &asset.to_string()])?;
+        out.trim_matches('"')
+            .parse()
+            .map_err(|_| ChainError::Parse(format!("dep_head({asset}) -> {out:?}")))
     }
 
     fn get_pending_deposit(&self, asset: u32, seq: u64) -> Result<(Fr, u64), ChainError> {

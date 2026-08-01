@@ -1,2 +1,7 @@
 [workspace]
-members = ["lib", "trivial", "batch_n4", "batch_n16", "batch_n64", "batch_n128", "batch_n256", "batch_repo", "recur1", "recur2"]
+# batch_n* are the LEGACY payments-era mains, kept only for cost-scaling
+# benchmarks (scripts/bench_proving.sh) and the batch_n4 golden fixture;
+# trivial exists for the minimal verifier fixture. None of them are
+# deployable (sequencer config accepts only batch_repo) and their VKs must
+# never be given to a production rollup instance (issue #1 L13).
+members = ["lib", "trivial", "batch_n4", "batch_n16", "batch_n64", "batch_n128", "batch_n256", "batch_repo"]

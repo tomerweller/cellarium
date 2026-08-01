@@ -35,9 +35,11 @@ only escrow totals, state roots, and commitments touch the chain.
    haircut, at the oracle price bound into the batch:
    `coll·price·2·10⁴ < cash·(2·10⁴+haircut)·10⁷`.
 
-Every batch proves the 7-public-input relation
+Every batch proves the 8-public-input relation
 `(old_state_root, new_state_root, deposit_hash, withdraw_hash, da_commitment,
-batch_ts, price)` where `state_root = Poseidon2([account_root, position_root])`.
+batch_ts, price, instance_id)` where `state_root = Poseidon2([account_root,
+position_root])` and `instance_id = address_to_field(rollup contract)` binds
+each proof to its deployment (no cross-instance replay, issue #1 L10).
 The contract binds `batch_ts` to the ledger clock (one-sided: claimed ≤
 ledger, lag ≤ 60s — a batch can never be future-dated into a premature
 default) and reads `price` from the oracle in the same invocation, rejecting
@@ -48,7 +50,7 @@ stale (>5 min) prices.
 | Component | Path | What it is |
 |---|---|---|
 | Circuits | `circuits/` | Noir batch state-transition (`batch_repo`: 4 deposits, 2 closes, 2 defaults/liquidations, 2 opens, 4 payments per batch; Poseidon2 trees, Grumpkin Schnorr). |
-| Rollup contract | `contracts/rollup/` | Soroban: two-asset SEP-41 custody, per-asset deposit queues, `submit_batch` verifying the 7-PI UltraHonk proof, timestamp window + oracle price binding. |
+| Rollup contract | `contracts/rollup/` | Soroban: two-asset SEP-41 custody, per-asset deposit queues (with a timeout refund for jammed heads), `submit_batch` verifying the 8-PI UltraHonk proof, timestamp window + oracle price binding. |
 | tUST | `contracts/tust/` | Mock collateral token: pure Soroban SEP-41, 7 decimals, admin mint, supply cap ≤ u64::MAX enforced in-contract. |
 | Oracle | `contracts/oracle/` | Mock price oracle (admin-set XLM-per-tUST × 1e7 + ledger timestamp), loosely Reflector-shaped. |
 | Harness | `harness/` | Shared Rust: both trees, keys, Poseidon2 (through a Soroban `Env`, so off-chain ≡ on-chain), witness builder, interest math (fixture-tested against the circuit), prover driver. |
@@ -99,15 +101,18 @@ position tree. The DA blob is served by the sequencer (`GET /da/:batch_num`)
 and bound by the proven `da_commitment` (fold over close messages,
 default/liquidation records, open records, and payment messages, in
 application order). Intent listings are filtered to the named counterparty
-(unauthenticated — prototype caveat; the sequencer sees everything by
-construction).
+AND require a signed read-auth challenge proving control of the queried key
+(issue #1 L12; the sequencer still sees everything by construction).
 
-One caveat for proof-observers: the deployed flavor is **non-ZK** UltraHonk
-(DESIGN.md pins it for verification cost), which does not blind the witness.
-The privacy statements above are heuristic against someone holding the proof
-bytes themselves — extraction from a 2^17-row trace is unanalyzed, not
-cryptographically impossible. Enable `bb prove --zk` (and re-measure the
-on-chain budget) if zero-knowledge against proof-observers is required.
+One caveat for proof-observers: the deployed flavor is **non-ZK** UltraHonk,
+which does not blind the witness. The privacy statements above are heuristic
+against someone holding the proof bytes themselves — extraction from a
+2^17-row trace is unanalyzed, not cryptographically impossible. The ZK
+flavor was measured (issue #1 M6): `bb prove --zk` costs ~0.64s vs ~0.50s
+non-ZK on the dev machine with equal memory — affordable — but it emits a
+507-field (16,224-byte) proof that the pinned Soroban verifier
+(456-field/14,592-byte, non-ZK only) cannot verify. Turning it on requires a
+ZK-capable verifier crate, tracked as a production delta in DESIGN.md.
 
 ## Testing
 
@@ -154,6 +159,8 @@ immutable VK per instance, localStorage key custody, 256 accounts / 256
 open positions, unaudited verifier crate, and the 60s/5-min timestamp/price
 windows documented in DESIGN.md. Also: accounts are never evicted, so a
 deposit to a fresh `pk_x` while the 256-slot tree is full can never be
-consumed and — the FIFO prefix being mandatory — blocks every deposit queued
-behind it, with no on-chain refund path (issue #1 M5); production needs
-deposit gating, a timeout refund entrypoint, or zero-balance eviction.
+consumed. Since issue #1 M5's remediation the jam is bounded, not permanent:
+once the queue head has sat unconsumed for 24h, anyone may call
+`refund_deposit` to return it to the original depositor and unblock the
+FIFO behind it (production would still want deposit gating or zero-balance
+eviction so honest deposits don't wait out the timeout).

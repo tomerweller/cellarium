@@ -21,6 +21,33 @@ pub async fn run(
     loop {
         interval.tick().await;
 
+        // Refund detection (issue #1 M5): the contract's refund_deposit
+        // advances the queue head without a batch. Report the heads so the
+        // engine can retire still-'pending' rows the chain already refunded.
+        let mut heads = [0u64; 2];
+        let mut heads_ok = true;
+        for asset in 0..2u32 {
+            let c = client.clone();
+            match tokio::task::spawn_blocking(move || c.dep_head(asset)).await {
+                Ok(Ok(h)) => heads[asset as usize] = h,
+                Ok(Err(e)) => {
+                    tracing::warn!(asset, %e, "dep_head poll failed");
+                    heads_ok = false;
+                }
+                Err(e) => {
+                    tracing::error!(asset, %e, "dep_head task panicked");
+                    heads_ok = false;
+                }
+            }
+        }
+        if heads_ok {
+            let (tx, rx) = oneshot::channel();
+            if engine.send(Command::ObservedQueueHeads(heads, tx)).is_err() {
+                return;
+            }
+            let _ = rx.await;
+        }
+
         for asset in 0..2u32 {
             let cursor = cursors[asset as usize];
             let c = client.clone();

@@ -362,10 +362,11 @@ These amend the sections above and take precedence where they conflict.
   inclusion time — but close is only valid through `maturity_ts`, so the
   worst-case repay is computable at signing time. Accept; surface the
   at-maturity repay amount in the wallet next to Close.
-- **Intent privacy (1.8):** `GET /intents?counterparty=<pk_x>` is filtered but
-  unauthenticated in this prototype (privacy from casual observers only; the
-  sequencer sees everything anyway under the validium trust model). Document
-  as a caveat rather than building signature-authenticated queries.
+- **Intent privacy (1.8):** `GET /intents/{pk_x}` is filtered to the queried
+  key AND (since the issue #1 L12 remediation) requires signature-
+  authenticated queries: a Schnorr signature over
+  `P2([DOMAIN_AUTH=13, pk_x, ts], 3)` with ts within ±300s, passed as query
+  params. The sequencer still sees everything under the validium trust model.
 - **Oracle admin:** a dedicated admin keypair generated at bootstrap and
   written to `.env`; `scripts/set_price` uses it. Per §3's decision, every
   batch requires a fresh price, so the sequencer (or e2e script) refreshes the

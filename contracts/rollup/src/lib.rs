@@ -1,9 +1,11 @@
 //! Repo ZK-rollup contract (multi-asset validium): custody of two SEP-41
 //! tokens — cash (XLM) and collateral (tUST) — with the combined state root
 //! (accounts + positions) advanced by UltraHonk-proven batches carrying the
-//! full 7-public-input interface: old/new state roots, deposit/withdraw
-//! folds, DA commitment, batch timestamp (one-sided window) and the oracle
-//! price (DESIGN.md, PLAN.md).
+//! full 8-public-input interface: old/new state roots, deposit/withdraw
+//! folds, DA commitment, batch timestamp (one-sided window), the oracle
+//! price, and the instance id — address_to_field(this contract) — so proofs
+//! cannot replay across deployments sharing a VK (issue #1 L10).
+//! (DESIGN.md, PLAN.md.)
 #![no_std]
 
 pub mod events;
@@ -17,8 +19,10 @@ use soroban_sdk::{
 pub use storage::{PendingDeposit, ASSET_CASH, ASSET_COLL};
 use ultrahonk_soroban_verifier::{UltraHonkVerifier, PROOF_BYTES};
 
-/// Inline withdrawal execution cap per batch (write-entry/CPU headroom).
-pub const MAX_WITHDRAWALS: u32 = 8;
+/// Inline withdrawal execution cap per batch. The circuit proves at most
+/// T = 4 payments per batch, so more than 4 withdrawals can never verify —
+/// keep the contract bound aligned with the circuit capacity (issue #1 L14).
+pub const MAX_WITHDRAWALS: u32 = 4;
 /// L2 balances are u64 in-circuit; deposits must fit.
 ///
 /// Deployment invariant: each custody token's total supply (in base units)
@@ -36,6 +40,14 @@ pub const MAX_AMOUNT: i128 = (u64::MAX as i128) + 1;
 pub const MAX_TS_LAG_SECS: u64 = 60;
 /// Oracle price must be at most this old at submission (PLAN.md 1.5).
 pub const MAX_PRICE_AGE_SECS: u64 = 300;
+
+/// How long a deposit-queue entry must sit unconsumed before anyone may
+/// trigger its refund (issue #1 M5). A healthy sequencer consumes deposits
+/// within minutes; an entry this old is jammed (tree full / operator gone),
+/// and because the FIFO prefix is mandatory it blocks everything behind it.
+/// Refunds are head-only and pay the ORIGINAL depositor, so the permission-
+/// less trigger can at worst return someone's own funds to them.
+pub const REFUND_DELAY_SECS: u64 = 86_400;
 
 /// Public padding account x-coordinate (circuits PAD_PK_X / sk=7·G). Deposits
 /// to this key are rejected — the secret is public, so any credit would be
@@ -67,6 +79,10 @@ pub enum RollupError {
     StalePrice = 12,
     /// submit_batch caller is not the pinned operator (issue #1 H1).
     NotOperator = 13,
+    /// refund_deposit: the queue is empty (nothing to refund).
+    EmptyQueue = 14,
+    /// refund_deposit: the head entry is younger than REFUND_DELAY_SECS.
+    RefundTooEarly = 15,
 }
 
 /// Mirror of the oracle's PriceData (contracts/oracle); field names must
@@ -127,9 +143,9 @@ impl RollupContract {
         vk: Bytes,
         genesis_root: BytesN<32>,
     ) -> Result<(), RollupError> {
-        // Parse-validate the VK. 7 user PIs (old/new state roots,
-        // deposit_hash, withdraw_hash, da_commitment, batch_ts, price)
-        // + 16 pairing.
+        // Parse-validate the VK. 8 user PIs (old/new state roots,
+        // deposit_hash, withdraw_hash, da_commitment, batch_ts, price,
+        // instance_id) + 16 pairing.
         UltraHonkVerifier::new(&env, &vk).map_err(|_| RollupError::InvalidVerificationKey)?;
         storage::set_vk(&env, &vk);
         storage::set_token(&env, ASSET_CASH, &token_cash);
@@ -171,10 +187,47 @@ impl RollupContract {
         let token_client = token::TokenClient::new(&env, &storage::get_token(&env, asset));
         token_client.transfer(&from, &env.current_contract_address(), &amount);
 
-        let seq =
-            storage::enqueue_deposit(&env, asset, &PendingDeposit { pk_x: l2_pk_x.clone(), amount });
+        let seq = storage::enqueue_deposit(
+            &env,
+            asset,
+            &PendingDeposit {
+                pk_x: l2_pk_x.clone(),
+                amount,
+                from,
+                enqueued_at: env.ledger().timestamp(),
+            },
+        );
         events::Deposit { seq: &seq, asset: &asset, pk_x: &l2_pk_x, amount: &amount }.publish(&env);
         Ok(seq)
+    }
+
+    /// Refund the HEAD entry of an asset's deposit queue to its original
+    /// depositor once it has sat unconsumed for REFUND_DELAY_SECS (issue #1
+    /// M5). Permissionless: the funds can only go back to the recorded
+    /// depositor, and clearing a jammed head is exactly what unblocks the
+    /// FIFO for everyone queued behind it (accounts are never evicted, so a
+    /// deposit to a fresh pk_x with the 256-slot tree full is unconsumable
+    /// forever). Head-only keeps the on-chain fold semantics intact — no
+    /// tombstones inside the provable prefix.
+    pub fn refund_deposit(env: Env, asset: u32) -> Result<u64, RollupError> {
+        if asset > ASSET_COLL {
+            return Err(RollupError::InvalidAsset);
+        }
+        let head = storage::dep_head(&env, asset);
+        if head >= storage::dep_tail(&env, asset) {
+            return Err(RollupError::EmptyQueue);
+        }
+        let dep = storage::get_deposit(&env, asset, head);
+        let now = env.ledger().timestamp();
+        if now < dep.enqueued_at + REFUND_DELAY_SECS {
+            return Err(RollupError::RefundTooEarly);
+        }
+        let token_client = token::TokenClient::new(&env, &storage::get_token(&env, asset));
+        token_client.transfer(&env.current_contract_address(), &dep.from, &dep.amount);
+        storage::dequeue_deposits(&env, asset, 1);
+        events::Refund { seq: &head, asset: &asset, to: &dep.from, amount: &dep.amount }
+            .publish(&env);
+        Ok(head)
     }
 
     /// Verify a batch proof against the current root and the FIFO prefixes of
@@ -227,7 +280,7 @@ impl RollupContract {
             return Err(RollupError::StalePrice);
         }
 
-        // --- assemble the 7 public inputs (224 bytes), all derived on-chain ---
+        // --- assemble the 8 public inputs (256 bytes), all derived on-chain ---
         let old_root = storage::get_root(&env);
 
         // Deposit fold: cash-queue prefix first, then coll-queue prefix
@@ -263,6 +316,11 @@ impl RollupContract {
         publics::append_field(&env, &mut pis, &envelope.da_commitment);
         publics::append_field(&env, &mut pis, &publics::u64_word(&env, envelope.batch_ts));
         publics::append_field(&env, &mut pis, &publics::u128_word(&env, price_data.price as u128));
+        // 8th PI (issue #1 L10): bind the proof to THIS deployment. Two
+        // instances sharing a VK and genesis root would otherwise accept
+        // each other's proofs.
+        let instance_id = publics::address_to_field(&env, &env.current_contract_address());
+        publics::append_field(&env, &mut pis, &instance_id);
 
         // --- verify ---
         let vk = storage::get_vk(&env);

@@ -3,8 +3,8 @@
 //! hex (canonical); amounts = decimal strings; addresses = strkey.
 
 use crate::config::Config;
-use crate::engine::{ApiError, Command, WireAccept, WireClose, WireIntent, WireTx};
-use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use crate::engine::{ApiError, Command, WireAccept, WireAuth, WireClose, WireIntent, WireTx};
+use axum::extract::{DefaultBodyLimit, Path, Query, Request, State};
 use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
@@ -79,9 +79,9 @@ impl ApiError {
     fn status(&self) -> StatusCode {
         match self {
             ApiError::BadField(_) | ApiError::BadSignature => StatusCode::BAD_REQUEST,
-            ApiError::NonceMismatch { .. } | ApiError::InsufficientBalance { .. } => {
-                StatusCode::CONFLICT
-            }
+            ApiError::NonceMismatch { .. }
+            | ApiError::DuplicateNonce
+            | ApiError::InsufficientBalance { .. } => StatusCode::CONFLICT,
             ApiError::RecipientUnknown | ApiError::AccountUnknown | ApiError::NotFound => {
                 StatusCode::NOT_FOUND
             }
@@ -94,6 +94,7 @@ impl ApiError {
             ApiError::BadField(_) => "BAD_FIELD",
             ApiError::BadSignature => "BAD_SIGNATURE",
             ApiError::NonceMismatch { .. } => "NONCE_MISMATCH",
+            ApiError::DuplicateNonce => "DUPLICATE_NONCE",
             ApiError::InsufficientBalance { .. } => "INSUFFICIENT_BALANCE",
             ApiError::RecipientUnknown => "RECIPIENT_UNKNOWN",
             ApiError::AccountUnknown => "ACCOUNT_UNKNOWN",
@@ -208,12 +209,15 @@ async fn post_close(
 }
 
 /// Intents involving this pk (incoming = awaiting THEIR countersignature).
-/// Prototype caveat (PLAN.md 6.2): filtered but unauthenticated.
+/// Requires signed read-auth query params proving control of the key
+/// (?ts=&pk_y=&r_x=&r_y=&s_lo=&s_hi= — issue #1 L12).
 async fn get_intents(
     State(st): State<AppState>,
     Path(pk_x): Path<String>,
+    auth: Result<Query<WireAuth>, axum::extract::rejection::QueryRejection>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let intents = ask(&st.engine, |reply| Command::GetIntents(pk_x, reply)).await?;
+    let Query(auth) = auth.map_err(|_| ApiError::BadField("auth query params".into()))?;
+    let intents = ask(&st.engine, |reply| Command::GetIntents(pk_x, auth, reply)).await?;
     Ok(Json(intents))
 }
 

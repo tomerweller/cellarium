@@ -57,7 +57,11 @@ fn setup() -> Setup<'static> {
     let vk = Bytes::from_slice(&env, VK);
     let genesis = BytesN::from_array(&env, &hex32(meta["old_state_root"].as_str().unwrap()));
     let operator = Address::generate(&env);
-    let rollup_id = env.register(
+    // Pin the fixture's instance address (8th PI, issue #1 L10).
+    let instance_addr =
+        Address::from_string(&SString::from_str(&env, meta["instance_addr"].as_str().unwrap()));
+    let rollup_id = env.register_at(
+        &instance_addr,
         RollupContract,
         (cash_sac.address(), coll_sac.address(), oracle_id, operator.clone(), vk, genesis),
     );
@@ -78,17 +82,19 @@ fn envelope_with_withdrawals(s: &Setup, wds: Vec<Withdrawal>) -> BatchEnvelope {
 }
 
 #[test]
-fn nine_withdrawals_rejected() {
+fn five_withdrawals_rejected() {
+    // MAX_WITHDRAWALS = 4 aligns the contract with the circuit's T = 4
+    // payment slots (issue #1 L14): >4 withdrawals could never verify.
     let s = setup();
     let mut wds = vec![&s.env];
-    for _ in 0..9 {
+    for _ in 0..5 {
         wds.push_back(Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: 1 });
     }
     let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
     assert_eq!(r, Err(Ok(RollupError::TooManyWithdrawals)));
-    // Exactly 8 passes the bound (and then fails later, at verification).
+    // Exactly 4 passes the bound (and then fails later, at verification).
     let mut wds = vec![&s.env];
-    for _ in 0..8 {
+    for _ in 0..4 {
         wds.push_back(Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: 1 });
     }
     let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
@@ -171,6 +177,82 @@ fn partial_queue_consumption_across_batches() {
     assert!(s.rollup.try_get_pending_deposit(&ASSET_CASH, &0).is_err());
     assert!(s.rollup.try_get_pending_deposit(&ASSET_COLL, &0).is_err());
     assert_eq!(s.rollup.batch_num(), 1);
+}
+
+/// Cross-instance proof replay is rejected (issue #1 L10): a second rollup
+/// deployed with the SAME VK and genesis but at a different address derives
+/// a different instance_id (8th public input), so the fixture proof — valid
+/// on the pinned instance — must fail verification there.
+#[test]
+fn cross_instance_replay_rejected() {
+    let s = setup();
+    let admin = Address::generate(&s.env);
+    let cash_sac = s.env.register_stellar_asset_contract_v2(admin.clone());
+    let coll_sac = s.env.register_stellar_asset_contract_v2(admin);
+    token::StellarAssetClient::new(&s.env, &cash_sac.address()).mint(&s.funder, &100_000_000);
+    token::StellarAssetClient::new(&s.env, &coll_sac.address()).mint(&s.funder, &100_000_000);
+    let oracle_admin = Address::generate(&s.env);
+    let oracle_id = s.env.register(OracleContract, (&oracle_admin,));
+    let price: i128 = s.meta["price"].as_str().unwrap().parse().unwrap();
+    OracleContractClient::new(&s.env, &oracle_id).set_price(&price);
+
+    let vk = Bytes::from_slice(&s.env, VK);
+    let genesis =
+        BytesN::from_array(&s.env, &hex32(s.meta["old_state_root"].as_str().unwrap()));
+    let clone_id = s.env.register(
+        RollupContract,
+        (cash_sac.address(), coll_sac.address(), oracle_id, s.operator.clone(), vk, genesis),
+    );
+    let clone = RollupContractClient::new(&s.env, &clone_id);
+
+    // Same deposits, same envelope, same operator — different instance.
+    let alice_pk =
+        BytesN::from_array(&s.env, &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()));
+    let bob_pk =
+        BytesN::from_array(&s.env, &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()));
+    clone.deposit(&s.funder, &alice_pk, &ASSET_CASH, &10_000_000);
+    clone.deposit(&s.funder, &bob_pk, &ASSET_COLL, &5_000_000);
+    let envelope = fixture_envelope(&s);
+    s.env.cost_estimate().budget().reset_unlimited();
+    let r = clone.try_submit_batch(&s.operator, &envelope);
+    assert_eq!(r, Err(Ok(RollupError::VerificationFailed)));
+}
+
+/// Deposit-queue refunds (issue #1 M5): the head entry can be refunded by
+/// anyone once it has aged past REFUND_DELAY_SECS — funds return to the
+/// ORIGINAL depositor and the FIFO unblocks for entries behind it.
+#[test]
+fn deposit_refund_after_timeout() {
+    let s = setup();
+    let jammed_pk = BytesN::from_array(&s.env, &{
+        let mut a = [0u8; 32];
+        a[31] = 9; // canonical, nonzero, not PAD
+        a
+    });
+    let funder_before = token_balance(&s, &s.funder);
+    s.rollup.deposit(&s.funder, &jammed_pk, &ASSET_CASH, &700);
+    assert_eq!(token_balance(&s, &s.funder), funder_before - 700);
+
+    // Too early: the timeout has not elapsed.
+    let r = s.rollup.try_refund_deposit(&ASSET_CASH);
+    assert_eq!(r, Err(Ok(RollupError::RefundTooEarly)));
+
+    // Age past the refund delay; anyone may now trigger the refund and the
+    // funds go back to the recorded depositor.
+    let now = s.env.ledger().timestamp();
+    s.env.ledger().with_mut(|l| l.timestamp = now + rollup::REFUND_DELAY_SECS + 1);
+    assert_eq!(s.rollup.refund_deposit(&ASSET_CASH), 0);
+    assert_eq!(token_balance(&s, &s.funder), funder_before);
+    assert_eq!((s.rollup.dep_head(&ASSET_CASH), s.rollup.dep_tail(&ASSET_CASH)), (1, 1));
+
+    // Nothing left to refund.
+    let r = s.rollup.try_refund_deposit(&ASSET_CASH);
+    assert_eq!(r, Err(Ok(RollupError::EmptyQueue)));
+}
+
+fn token_balance(s: &Setup, who: &Address) -> i128 {
+    let cash = s.rollup.token(&ASSET_CASH);
+    token::TokenClient::new(&s.env, &cash).balance(who)
 }
 
 /// Submission is operator-only (issue #1 H1): without in-circuit pk_x

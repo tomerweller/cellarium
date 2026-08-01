@@ -57,6 +57,13 @@ export interface WireSig {
   s_hi: string;
 }
 
+/** Signed read-auth for private listing endpoints (issue #1 L12). */
+export interface IntentAuth {
+  ts: number;
+  pk_y: string;
+  sig: WireSig;
+}
+
 export interface Intent {
   id: number;
   initiator: 'borrower' | 'lender';
@@ -173,7 +180,23 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(tx),
     }),
-  intents: (pkX: string) => req<{ incoming: Intent[]; outgoing: Intent[] }>(`/intents/${pkX}`),
+  /**
+   * Intent listings are private (issue #1 L12): the sequencer requires a
+   * fresh signature by the queried key as query params. Use listIntents()
+   * (api/repo.ts) which builds the auth from the wallet secret.
+   */
+  intents: (pkX: string, auth: IntentAuth) =>
+    req<{ incoming: Intent[]; outgoing: Intent[] }>(
+      `/intents/${pkX}?` +
+        new URLSearchParams({
+          ts: auth.ts.toString(),
+          pk_y: auth.pk_y,
+          r_x: auth.sig.r_x,
+          r_y: auth.sig.r_y,
+          s_lo: auth.sig.s_lo,
+          s_hi: auth.sig.s_hi,
+        }).toString(),
+    ),
   positions: (pkX: string) => req<{ positions: Position[] }>(`/positions/${pkX}`),
   submitIntent: (intent: IntentRequest) =>
     req<{ id: number; status: string }>('/intent', {

@@ -10,6 +10,7 @@ import {
   createIntent,
   intentTerms,
   liquidationPrice,
+  listIntents,
 } from '../api/repo';
 import { api, Intent, Position } from '../api/sequencer';
 import { interest } from '../crypto/repo';
@@ -51,7 +52,8 @@ function Desk({ pkX, sk }: { pkX: string; sk: bigint }) {
   });
   const { data: intents } = useQuery({
     queryKey: ['intents', pkX],
-    queryFn: () => api.intents(pkX),
+    // Signed read-auth (issue #1 L12): listings require proof of key control.
+    queryFn: () => listIntents(sk),
     refetchInterval: POLL_MS,
   });
   const refresh = () => {
