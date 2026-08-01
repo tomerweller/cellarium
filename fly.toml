@@ -1,5 +1,15 @@
-# Cellarium sequencer on Fly.io. Deploy with scripts/deploy_fly.sh (reads the
-# bootstrap-generated .env, sets the secret, patches [env], remote-builds).
+# Cellarium sequencer on Fly.io. Deploy with scripts/deploy_fly.sh (sets the
+# SEQUENCER_SECRET, remote-builds).
+#
+# Self-bootstrapping: the container entrypoint (scripts/docker_entrypoint.sh,
+# AUTO_BOOTSTRAP=1) keeps the instance compatible with the shipped code. On
+# every boot it fingerprints the baked circuit's VK + the DB schema version
+# against the instance recorded on the /data volume; on mismatch (circuit
+# change, schema bump, or a blank volume) it deploys fresh tUST + oracle +
+# rollup contracts, archives the old DB, and records the new ids — so a push
+# to main that changes the circuit no longer needs a manual re-bootstrap.
+# Contract ids therefore live on the volume (instance.env), NOT here; the
+# wallet discovers them at runtime via GET /params.
 #
 # VM sizing is governed by the 5s-cadence requirement (docs/PROVING.md):
 # bb prove(batch_repo) must stay ≤ ~3.5s so every Stellar ledger can carry a
@@ -14,19 +24,11 @@ primary_region = "ord"
 [env]
   RPC_URL = "https://soroban-testnet.stellar.org"
   NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
-  # Public identifiers, patched from .env by scripts/deploy_fly.sh.
-  CONTRACT_ID = "CBCNLYJOYNSJQKWR75ANT5MACLRP27ATQ2X2XHT3JOIAB63WYVLZOSKJ"
-  TOKEN_ID = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
-  TUST_ID = "CDZIWDNUZ7DQZMDUJSDO7MDF24RBKCLOPSDQJPGEKG3VL2U5GL3YND3K"
-  ORACLE_ID = "CCCTIXDKKK2QM2DA4QRUKN5UA7P6Q36S3PI2HRE3UBSEVU2OMI4Y7TDP"
-  SEQUENCER_ADDRESS = "GB5JFZJIVTKNBXNIUOZVNUGBOW4IHZRXFDGTBXIZDPXTOAZFSCV3QQSI"
+  AUTO_BOOTSTRAP = "1"
   # 5s-cadence batching: eager trigger reacts within one 2s tick; a lone
   # op waits at most 5s.
   BATCH_MAX_WAIT_SECS = "5"
   TICK_SECS = "2"
-  # Must match the VK the live contract was bootstrapped with — a circuit
-  # change requires a re-bootstrap (the VK is contract-immutable) and a DB
-  # reset.
   CIRCUIT_PKG = "batch_repo"
   RUST_LOG = "sequencer=info"
 
@@ -41,7 +43,9 @@ primary_region = "ord"
   [[http_service.checks]]
     interval = "15s"
     timeout = "5s"
-    grace_period = "30s"
+    # Self-bootstrap (fresh contract deploys + friendbot) can take a couple
+    # of minutes on first boot after a circuit change — don't kill it early.
+    grace_period = "180s"
     method = "get"
     path = "/healthz"
 

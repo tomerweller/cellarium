@@ -1,32 +1,34 @@
 #!/usr/bin/env bash
-# Deploy the sequencer to Fly.io from the bootstrap-generated .env:
-# sets the secret, patches the public identifiers into fly.toml, and
-# remote-builds (required: the image is amd64-only and Apple Silicon
-# can't build it locally).
+# Deploy the sequencer to Fly.io. The container self-bootstraps
+# (AUTO_BOOTSTRAP=1 in fly.toml): on a circuit/schema change it deploys
+# fresh contracts and resets the DB by itself, so this script only needs to
+# guarantee the SEQUENCER_SECRET exists and kick off a remote build
+# (required: the image is amd64-only and Apple Silicon can't build it
+# locally).
+#
+# The secret comes from, in order: $SEQUENCER_SECRET, the bootstrap .env,
+# or the secret already set on the app.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-[ -f .env ] || { echo "no .env — run scripts/bootstrap_testnet.sh first"; exit 1; }
-set -a; . ./.env; set +a
-
 APP="${FLY_APP:-cellarium}"
 
-echo "==> patching fly.toml [env] with public identifiers"
-sed -i '' \
-  -e "s|CONTRACT_ID = \".*\"|CONTRACT_ID = \"$CONTRACT_ID\"|" \
-  -e "s|TOKEN_ID = \".*\"|TOKEN_ID = \"$TOKEN_ID\"|" \
-  -e "s|TUST_ID = \".*\"|TUST_ID = \"$TUST_ID\"|" \
-  -e "s|ORACLE_ID = \".*\"|ORACLE_ID = \"$ORACLE_ID\"|" \
-  -e "s|SEQUENCER_ADDRESS = \".*\"|SEQUENCER_ADDRESS = \"$SEQUENCER_ADDRESS\"|" \
-  fly.toml
+if [ -z "${SEQUENCER_SECRET:-}" ] && [ -f .env ]; then
+  SEQUENCER_SECRET=$(. ./.env; echo "${SEQUENCER_SECRET:-}")
+fi
 
-echo "==> setting secrets (staged; applied with the deploy)"
-fly secrets set --app "$APP" --stage "SEQUENCER_SECRET=$SEQUENCER_SECRET" >/dev/null
-# The oracle heartbeat: the sequencer re-stamps the mock price before it
-# goes stale (contract rejects prices older than 5 minutes).
-fly secrets set --app "$APP" --stage "ORACLE_ADMIN_SECRET=$ORACLE_ADMIN_SECRET" >/dev/null
+if [ -n "${SEQUENCER_SECRET:-}" ]; then
+  echo "==> staging SEQUENCER_SECRET (applied with the deploy)"
+  fly secrets set --app "$APP" --stage "SEQUENCER_SECRET=$SEQUENCER_SECRET" >/dev/null
+elif fly secrets list --app "$APP" | grep -q SEQUENCER_SECRET; then
+  echo "==> reusing the app's existing SEQUENCER_SECRET"
+else
+  echo "no SEQUENCER_SECRET in env/.env and none set on the app" >&2
+  echo "generate one:  stellar keys generate cellarium-op && stellar keys show cellarium-op" >&2
+  exit 1
+fi
 
-echo "==> remote deploy"
+echo "==> remote deploy (entrypoint re-bootstraps the instance if needed)"
 fly deploy --app "$APP" --remote-only
 
 echo "==> status"

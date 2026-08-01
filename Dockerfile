@@ -12,12 +12,15 @@ COPY Cargo.toml Cargo.lock ./
 COPY contracts/rollup/Cargo.toml contracts/rollup/Cargo.toml
 COPY harness/Cargo.toml harness/Cargo.toml
 COPY sequencer/Cargo.toml sequencer/Cargo.toml
-# Build just the sequencer binary and its dependency graph (not the wasm
-# contract — that's produced on the host at bootstrap time).
 COPY contracts contracts
 COPY harness harness
 COPY sequencer sequencer
 RUN cargo build --release -p sequencer --bins
+# Contract wasms for the auto-bootstrap entrypoint (AUTO_BOOTSTRAP=1): a
+# circuit/schema-incompatible boot deploys a fresh instance from inside the
+# container, so the image must carry deployable wasm for all three contracts.
+RUN rustup target add wasm32v1-none \
+    && cargo build --release --target wasm32v1-none -p rollup -p tust -p oracle
 
 FROM --platform=linux/amd64 debian:bookworm-slim AS tools
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates tar gzip git \
@@ -65,6 +68,16 @@ RUN cd /app/circuits && mkdir -p /tmp/crs-warm \
 ENV CIRCUITS_DIR=/app/circuits
 ENV DB_PATH=/data/sequencer.db
 ENV LISTEN_ADDR=0.0.0.0:8080
+# Contract wasms + entrypoint for opt-in self-bootstrap (AUTO_BOOTSTRAP=1):
+# when the baked circuit's VK or the DB schema no longer matches the
+# instance recorded on the volume, the entrypoint deploys fresh contracts,
+# archives the old DB, and starts against the new instance. Without
+# AUTO_BOOTSTRAP it execs the sequencer directly (docker-compose flow).
+COPY --from=builder /app/target/wasm32v1-none/release/rollup.wasm /app/wasm/rollup.wasm
+COPY --from=builder /app/target/wasm32v1-none/release/tust.wasm /app/wasm/tust.wasm
+COPY --from=builder /app/target/wasm32v1-none/release/oracle.wasm /app/wasm/oracle.wasm
+COPY scripts/docker_entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 EXPOSE 8080
 VOLUME ["/data"]
-ENTRYPOINT ["sequencer"]
+ENTRYPOINT ["/app/entrypoint.sh"]

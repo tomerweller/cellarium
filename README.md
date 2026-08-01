@@ -93,6 +93,17 @@ price-crash liquidation):
 scripts/demo.sh
 ```
 
+**Cloud deployment is self-healing:** pushing to `main` deploys the
+sequencer to Fly (`.github/workflows/fly.yml`) and the wallet to GitHub
+Pages. The sequencer container self-bootstraps
+(`scripts/docker_entrypoint.sh`): on boot it fingerprints the baked
+circuit's VK + DB schema against the instance recorded on its volume, and
+on mismatch deploys fresh tUST/oracle/rollup contracts, archives the old
+DB, and records the new instance — so a circuit or schema change needs no
+manual re-bootstrap. The wallet picks up the new contract ids at runtime
+from `GET /params`. (The abandoned instance's queued deposits remain
+reclaimable via its permissionless `refund_deposit` after the 24h timeout.)
+
 ## Privacy
 
 On L1 you can see: total XLM/tUST escrowed, state roots, DA commitments, and

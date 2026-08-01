@@ -26,14 +26,24 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
-    // One-shot subcommand (needs no config/env): print the empty-tree genesis
-    // root and exit. Used by the bootstrap script.
-    if std::env::args().nth(1).as_deref() == Some("genesis-root") {
+    // One-shot subcommands (need no config/env), used by the bootstrap
+    // scripts and the container's auto-bootstrap entrypoint.
+    match std::env::args().nth(1).as_deref() {
         // Combined genesis: P2([empty account root, empty position root]).
-        let hasher = harness::poseidon::Hasher::new();
-        let state = harness::repo::L2State::new();
-        println!("{}", hexutil::fr_hex(&state.state_root(&hasher)));
-        return Ok(());
+        Some("genesis-root") => {
+            let hasher = harness::poseidon::Hasher::new();
+            let state = harness::repo::L2State::new();
+            println!("{}", hexutil::fr_hex(&state.state_root(&hasher)));
+            return Ok(());
+        }
+        // The SQLite schema version this binary requires. Part of the
+        // deployment compatibility fingerprint: a bump means the on-volume
+        // DB must be reset (db::migrate refuses to open older versions).
+        Some("schema-version") => {
+            println!("{}", db::SCHEMA_VERSION);
+            return Ok(());
+        }
+        _ => {}
     }
 
     let cfg = Config::from_env()?;
