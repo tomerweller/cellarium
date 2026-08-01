@@ -57,6 +57,7 @@ stale (>5 min) prices.
 | Sequencer | `sequencer/` | Long-running backend (axum): mempool + intent matching + close queue, maturity/margin watcher, batch/prove/submit pipeline, DA + state HTTP API (`/positions`, `/intents`). |
 | Wallet | `wallet/` | Browser repo desk (Vite + React + TS): two balances, deposit/withdraw per asset, post/countersign intents, live accrued interest + liquidation price per position, borrower close. |
 
+Architecture overview: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Design details: [`DESIGN.md`](DESIGN.md). Project plan and agreed refinements:
 [`PLAN.md`](PLAN.md). Measurements: [`REPORT.md`](REPORT.md).
 
