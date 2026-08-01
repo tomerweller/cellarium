@@ -293,9 +293,21 @@ async fn resume(
                 Some(Landed::Foreign(chain_root)) => {
                     halt_on_foreign_root(batch_num, &new_root, &chain_root);
                 }
-                Some(Landed::No) | None => {
+                Some(Landed::No) => {
                     tracing::warn!(batch_num, batch_ts, "resume: timestamp window lapsed; rebuilding");
                     fail(engine, batch_num, "timestamp window lapsed").await;
+                }
+                None => {
+                    // Chain state UNKNOWN (RPC unreachable) is not evidence of
+                    // non-landing: failing here would delete the only
+                    // blob/proof recovery row for a batch that may have
+                    // landed (issue #17). Retain it — the tick loop's
+                    // self-heal keeps re-checking until root/counter reads
+                    // give a definitive answer.
+                    tracing::warn!(
+                        batch_num,
+                        "resume: chain status unavailable; retaining lapsed batch for retry"
+                    );
                 }
             }
         }
@@ -363,4 +375,92 @@ where
     F: FnOnce(oneshot::Sender<Result<T, ApiError>>) -> Command,
 {
     ask(engine, build).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::stellar::ChainError;
+    use harness::poseidon::fr_from_u64;
+
+    /// Chain stub: `reachable=false` errors every read (RPC outage);
+    /// `reachable=true` reports batch counter 0 (nothing landed).
+    struct MockChain {
+        reachable: bool,
+    }
+    impl StellarClient for MockChain {
+        fn root(&self) -> Result<Fr, ChainError> {
+            if self.reachable { Ok(fr_from_u64(0)) } else { Err(ChainError::Cli("down".into())) }
+        }
+        fn batch_num(&self) -> Result<u64, ChainError> {
+            if self.reachable { Ok(0) } else { Err(ChainError::Cli("down".into())) }
+        }
+        fn oracle_price(&self) -> Result<(u64, u64), ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+        fn refresh_oracle_price(&self, _price: u64) -> Result<(), ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+        fn dep_tail(&self, _asset: u32) -> Result<u64, ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+        fn get_pending_deposit(&self, _asset: u32, _seq: u64) -> Result<(Fr, u64), ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+        fn submit_batch(&self, _envelope_json: &str) -> Result<(), ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+    }
+
+    fn test_cfg() -> Config {
+        Config {
+            rpc_url: String::new(),
+            network_passphrase: String::new(),
+            contract_id: String::new(),
+            token_id: String::new(),
+            tust_id: String::new(),
+            sequencer_secret: String::new(),
+            sequencer_address: None,
+            db_path: "".into(),
+            listen_addr: String::new(),
+            batch_max_wait_secs: 0,
+            tick_secs: 1,
+            cli_timeout_secs: 5,
+            submit_timeout_secs: 5,
+            circuit_pkg: "batch_repo".into(),
+            deposit_slots: 4,
+            close_slots: 2,
+            liq_slots: 2,
+            open_slots: 2,
+            tx_slots: 4,
+            oracle_id: String::new(),
+            oracle_admin_secret: None,
+        }
+    }
+
+    /// Issue #17: a lapsed batch must be RETAINED (no engine command at all)
+    /// when the chain cannot be read — it may have landed.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resume_retains_lapsed_batch_when_chain_unknown() {
+        let (tx, rx) = mpsc::channel::<Command>();
+        let client: Arc<dyn StellarClient> = Arc::new(MockChain { reachable: false });
+        resume(&tx, &client, &test_cfg(), 7, "submitted", 0, fr_from_u64(1)).await;
+        assert!(rx.try_recv().is_err(), "lapsed batch was acted on despite unknown chain state");
+    }
+
+    /// Confirmed non-landing (counter below ours) still fails + requeues.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn resume_fails_lapsed_batch_on_confirmed_not_landed() {
+        let (tx, rx) = mpsc::channel::<Command>();
+        let service = std::thread::spawn(move || match rx.recv() {
+            Ok(Command::FailBatch(bn, _, reply)) => {
+                let _ = reply.send(Ok(()));
+                Some(bn)
+            }
+            _ => None,
+        });
+        let client: Arc<dyn StellarClient> = Arc::new(MockChain { reachable: true });
+        resume(&tx, &client, &test_cfg(), 7, "submitted", 0, fr_from_u64(1)).await;
+        assert_eq!(service.join().unwrap(), Some(7));
+    }
 }
