@@ -1996,6 +1996,8 @@ mod engine_tests {
                 listen_addr: String::new(),
                 batch_max_wait_secs: max_wait,
                 tick_secs: 1,
+                cli_timeout_secs: 30,
+                submit_timeout_secs: 180,
                 circuit_pkg: "batch_repo".into(),
                 deposit_slots,
                 close_slots: 2,

@@ -19,6 +19,10 @@ pub struct Config {
     pub batch_max_wait_secs: u64,
     /// Watcher/batcher poll interval.
     pub tick_secs: u64,
+    /// Hard deadline for read/simulate/key CLI subprocesses (issue #11).
+    pub cli_timeout_secs: u64,
+    /// Hard deadline for transaction-sending CLI subprocesses (sign+send+confirm).
+    pub submit_timeout_secs: u64,
     /// Circuit package to prove (fixed shape D=4/O=2/T=4 for batch_repo).
     pub circuit_pkg: String,
     pub deposit_slots: usize,
@@ -62,6 +66,8 @@ impl Config {
             listen_addr: var_or("LISTEN_ADDR", "0.0.0.0:8080"),
             batch_max_wait_secs: var_or("BATCH_MAX_WAIT_SECS", "30").parse().map_err(|_| "bad BATCH_MAX_WAIT_SECS")?,
             tick_secs: var_or("TICK_SECS", "5").parse().map_err(|_| "bad TICK_SECS")?,
+            cli_timeout_secs: var_or("CLI_TIMEOUT_SECS", "30").parse().map_err(|_| "bad CLI_TIMEOUT_SECS")?,
+            submit_timeout_secs: var_or("SUBMIT_TIMEOUT_SECS", "180").parse().map_err(|_| "bad SUBMIT_TIMEOUT_SECS")?,
             circuit_pkg,
             deposit_slots,
             close_slots,

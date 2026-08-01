@@ -4,7 +4,13 @@
 
 use crate::hexutil::{parse_fr, HexError};
 use harness::poseidon::Fr;
-use std::process::Command;
+use std::io::Read;
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+/// Total subprocess deadline expirations since boot (readiness/diagnostics).
+pub static TIMEOUT_COUNT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChainError {
@@ -14,6 +20,46 @@ pub enum ChainError {
     Parse(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    #[error("timeout: {what} exceeded {secs}s")]
+    Timeout { what: String, secs: u64 },
+}
+
+/// Run `cmd` to completion with a hard deadline. On expiry the child is
+/// killed and reaped — a hung CLI/RPC subprocess must never wedge the
+/// watcher, batcher, or boot sequence (issue #11).
+fn run_with_timeout(mut cmd: Command, what: &str, timeout: Duration) -> Result<Output, ChainError> {
+    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn()?;
+    // Drain pipes on threads so a chatty child can't block on a full pipe
+    // while we poll for exit.
+    let mut stdout_pipe = child.stdout.take().expect("stdout piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr piped");
+    let out_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait()? {
+            Some(status) => break status,
+            None if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                TIMEOUT_COUNT.fetch_add(1, Ordering::Relaxed);
+                return Err(ChainError::Timeout { what: what.to_string(), secs: timeout.as_secs() });
+            }
+            None => std::thread::sleep(Duration::from_millis(25)),
+        }
+    };
+    let stdout = out_thread.join().unwrap_or_default();
+    let stderr = err_thread.join().unwrap_or_default();
+    Ok(Output { status, stdout, stderr })
 }
 
 impl From<HexError> for ChainError {
@@ -58,18 +104,24 @@ pub struct CliClient {
     pub oracle_id: String,
     pub sequencer_address: String,
     pub has_oracle_admin: bool,
+    /// Deadline for read/simulate and local key operations.
+    pub cli_timeout: Duration,
+    /// Deadline for transaction-sending invocations (sign+send+confirm).
+    pub submit_timeout: Duration,
 }
 
 impl CliClient {
     pub fn new(cfg: &crate::config::Config) -> Result<Self, ChainError> {
+        let cli_timeout = Duration::from_secs(cfg.cli_timeout_secs);
+        let submit_timeout = Duration::from_secs(cfg.submit_timeout_secs);
         // Register the runtime identity from the secret — idempotently
         // (--overwrite tolerates a prior boot). The secret travels via env,
         // never argv; every later invoke uses the identity NAME.
-        let o = Command::new("stellar")
-            .args(["keys", "add", IDENTITY, "--secret-key", "--overwrite"])
+        let mut cmd = Command::new("stellar");
+        cmd.args(["keys", "add", IDENTITY, "--secret-key", "--overwrite"])
             .env("SOROBAN_SECRET_KEY", &cfg.sequencer_secret)
-            .env("STELLAR_SECRET_KEY", &cfg.sequencer_secret)
-            .output()?;
+            .env("STELLAR_SECRET_KEY", &cfg.sequencer_secret);
+        let o = run_with_timeout(cmd, "keys add", cli_timeout)?;
         if !o.status.success() {
             return Err(ChainError::Cli(format!(
                 "cannot register sequencer identity: {}",
@@ -81,7 +133,9 @@ impl CliClient {
         let sequencer_address = match &cfg.sequencer_address {
             Some(addr) if !addr.is_empty() => addr.clone(),
             _ => {
-                let o = Command::new("stellar").args(["keys", "address", IDENTITY]).output()?;
+                let mut cmd = Command::new("stellar");
+                cmd.args(["keys", "address", IDENTITY]);
+                let o = run_with_timeout(cmd, "keys address", cli_timeout)?;
                 if !o.status.success() {
                     return Err(ChainError::Cli(format!(
                         "cannot resolve sequencer address: {}",
@@ -94,11 +148,11 @@ impl CliClient {
         // Register the oracle admin identity if provided (same env-only
         // secret handling as the sequencer identity).
         let has_oracle_admin = if let Some(secret) = &cfg.oracle_admin_secret {
-            let o = Command::new("stellar")
-                .args(["keys", "add", ORACLE_IDENTITY, "--secret-key", "--overwrite"])
+            let mut cmd = Command::new("stellar");
+            cmd.args(["keys", "add", ORACLE_IDENTITY, "--secret-key", "--overwrite"])
                 .env("SOROBAN_SECRET_KEY", secret)
-                .env("STELLAR_SECRET_KEY", secret)
-                .output()?;
+                .env("STELLAR_SECRET_KEY", secret);
+            let o = run_with_timeout(cmd, "keys add (oracle)", cli_timeout)?;
             if !o.status.success() {
                 return Err(ChainError::Cli(format!(
                     "cannot register oracle admin identity: {}",
@@ -116,6 +170,8 @@ impl CliClient {
             oracle_id: cfg.oracle_id.clone(),
             sequencer_address,
             has_oracle_admin,
+            cli_timeout,
+            submit_timeout,
         })
     }
 
@@ -138,7 +194,9 @@ impl CliClient {
         }
         cmd.arg("--");
         cmd.args(func_and_args);
-        let out = cmd.output()?;
+        let what = format!("invoke {}", func_and_args.first().unwrap_or(&"?"));
+        let timeout = if send { self.submit_timeout } else { self.cli_timeout };
+        let out = run_with_timeout(cmd, &what, timeout)?;
         if !out.status.success() {
             return Err(ChainError::Cli(format!(
                 "invoke {:?} failed: {}",
@@ -191,15 +249,15 @@ impl StellarClient for CliClient {
         if !self.has_oracle_admin {
             return Err(ChainError::Cli("no oracle admin identity configured".into()));
         }
-        let out = Command::new("stellar")
-            .args([
-                "contract", "invoke", "--id", &self.oracle_id,
-                "--rpc-url", &self.rpc_url,
-                "--network-passphrase", &self.network_passphrase,
-                "--source-account", ORACLE_IDENTITY,
-                "--", "set_price", "--price", &price.to_string(),
-            ])
-            .output()?;
+        let mut cmd = Command::new("stellar");
+        cmd.args([
+            "contract", "invoke", "--id", &self.oracle_id,
+            "--rpc-url", &self.rpc_url,
+            "--network-passphrase", &self.network_passphrase,
+            "--source-account", ORACLE_IDENTITY,
+            "--", "set_price", "--price", &price.to_string(),
+        ]);
+        let out = run_with_timeout(cmd, "oracle set_price", self.submit_timeout)?;
         if !out.status.success() {
             return Err(ChainError::Cli(format!(
                 "oracle refresh failed: {}",
@@ -257,5 +315,32 @@ impl StellarClient for CliClient {
             ],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn timeout_kills_hanging_child() {
+        let mut cmd = Command::new("sleep");
+        cmd.arg("30");
+        let before = TIMEOUT_COUNT.load(Ordering::Relaxed);
+        let start = Instant::now();
+        let err = run_with_timeout(cmd, "sleep", Duration::from_millis(200)).unwrap_err();
+        assert!(start.elapsed() < Duration::from_secs(5), "child was not killed promptly");
+        assert!(matches!(err, ChainError::Timeout { .. }), "expected timeout, got {err:?}");
+        assert!(TIMEOUT_COUNT.load(Ordering::Relaxed) > before);
+    }
+
+    #[test]
+    fn fast_child_output_is_captured() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo out; echo err 1>&2"]);
+        let out = run_with_timeout(cmd, "sh", Duration::from_secs(10)).unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "out");
+        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), "err");
     }
 }
