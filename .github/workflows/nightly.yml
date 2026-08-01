@@ -47,9 +47,12 @@ jobs:
           ~/.bb/bbup -v $BB_VERSION
 
       - name: Regenerate fixtures from current circuits (real proving)
+        # demo-repo-batch is the PRODUCTION circuit path (batch_repo powers
+        # the deployed prover — issue #15); n4/n16 cover the payments shapes.
         run: |
           cargo run -q --release -p harness -- demo-batch
           cargo run -q --release -p harness -- demo-batch-n16
+          cargo run -q --release -p harness -- demo-repo-batch
 
       - name: Contract tests against FRESH fixtures
         run: cargo test -p rollup
@@ -57,8 +60,10 @@ jobs:
       - name: Drift alarm (vk/meta/vectors must match checked-in copies)
         run: |
           git diff --exit-code fixtures/batch_n4/vk.bin fixtures/batch_n4/meta.json \
-            fixtures/batch_n16/vk.bin fixtures/vectors.json || {
+            fixtures/batch_n16/vk.bin \
+            fixtures/batch_repo/vk.bin fixtures/batch_repo/meta.json \
+            fixtures/vectors.json || {
             echo "::error::Checked-in fixtures no longer match the current circuits."
-            echo "Regenerate (demo-batch / demo-batch-n16 / vectors-json), re-run all suites, and commit."
+            echo "Regenerate (demo-batch / demo-batch-n16 / demo-repo-batch / vectors-json), re-run all suites, and commit."
             exit 1
           }

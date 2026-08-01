@@ -426,6 +426,14 @@ impl RollupContract {
     pub fn oracle(env: Env) -> Address {
         storage::get_oracle(&env)
     }
+
+    /// SHA-256 of the stored verification key. Deployment tooling compares
+    /// this against the VK compiled into the release image so a circuit
+    /// change can never ship against a contract whose immutable VK cannot
+    /// verify its proofs (issue #2).
+    pub fn vk_hash(env: Env) -> BytesN<32> {
+        env.crypto().sha256(&storage::get_vk(&env)).to_bytes()
+    }
 }
 
 #[cfg(test)]

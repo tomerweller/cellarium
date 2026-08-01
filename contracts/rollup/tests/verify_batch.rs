@@ -24,6 +24,18 @@ fn setup(env: &Env) -> RollupContractClient<'_> {
     RollupContractClient::new(env, &id)
 }
 
+/// Issue #2: deployment tooling compares the image VK against the live
+/// contract through this getter — it must hash exactly the constructor VK.
+#[test]
+fn vk_hash_matches_constructor_vk() {
+    let env = Env::default();
+    env.cost_estimate().budget().reset_unlimited();
+    let client = setup(&env);
+
+    let expected = env.crypto().sha256(&Bytes::from_slice(&env, VK)).to_bytes();
+    assert_eq!(client.vk_hash(), expected);
+}
+
 #[test]
 fn batch_proof_verifies() {
     let env = Env::default();
