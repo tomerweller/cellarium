@@ -91,6 +91,50 @@ Issues classified **ops** or **design** are intentionally not "addressed" by
 code here; they need operator access or a decision. See the session report for
 the specific decision each one is blocked on.
 
-## Status
+## Status (end of triage session, 2026-08-01)
 
-Updated at end of session — see final section of the session report.
+**Addressed on this branch (23 issues):**
+
+| # | Commit theme |
+|---|---|
+| 2 | vk_hash() getter + scripts/check_vk.sh + fly.yml vk-guard job |
+| 10 | /readyz readiness, watcher/batcher heartbeats, task supervision |
+| 11 | run_with_timeout around every stellar CLI subprocess |
+| 12 | .dockerignore secrets allowlist (+ wallet/.dockerignore) |
+| 13 | confirm_batch commits before advancing the live tree |
+| 15 | nightly regenerates/diffs batch_repo (demo-repo-batch) |
+| 16 | cross-class QUEUE_CONFLICT admission guards |
+| 17 | lapsed batch retained when chain state unknown |
+| 19 | deposit hash persisted at submission; ambiguous timeouts resumable |
+| 20 | intent dedup/caps/TTL; trusted proxy header only |
+| 21 | account_root + position_root in /account; combined-root verification |
+| 23 | role-encoded repo history kinds + entryView (asset/direction correct) |
+| 24 | pending deposits keyed by asset + baseline; no silent age-out |
+| 25 | 15s deadlines on sequencer fetch + Stellar RPC |
+| 26 | repayment labeled as estimate with settlement-timestamp caveat |
+| 27 | parseScaled exact decimal parsing for repo inputs |
+| 29 | fundingStatus funded/unfunded/unknown |
+| 30 | error states (not empty states) on Activity/Repos/Explorer |
+| 31 | bounded /params freshness |
+| 35 | CI: fmt + clippy -D warnings + all workspace packages |
+| 39 | obsolete scripts deleted |
+| 40 | consistent boot root/batch snapshot with retry |
+| 44/47 | *(immediate items only)* honest privacy docs + CI phrase guard |
+| 45 | payload-aware idempotency; NONCE_CONFLICT |
+
+**Still open — needs operator access (ops):** #3 (Pages HTTPS enforcement),
+#4 (live Fly outage/deploy), #6 (response headers on the static host),
+#8 (branch protection + required checks), #18 (SPA rewrites or host move).
+
+**Still open — needs a design decision:** #5 (backup/RPO-RTO target),
+#9 (derivation-message binding + key migration), #14 (TTL policy +
+redeploy), #34 (metrics stack), #36 (hermetic E2E runner), #42 (key
+custody model), #43 (deposit admission/refund contract change), #44
+(confidential DA redesign), #46 (in-circuit uniqueness), #47 (ZK-mode
+benchmark), #49 (forced exit).
+
+**Partially covered:** #22 (backend still collapses accepted-intent
+lifecycle; wallet now shows query errors), #28 (CSP still build-pinned),
+#32/#33 (mobile nav + accessibility untouched), #37 (e2e sleeps
+untouched), #38 (pins untouched), #41 (dependency audit untouched),
+#48 (regression tests added with each fix; dedicated suites remain).
