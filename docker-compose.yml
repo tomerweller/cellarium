@@ -26,7 +26,7 @@ services:
       SEQUENCER_SECRET: ${SEQUENCER_SECRET:?}
       SEQUENCER_ADDRESS: ${SEQUENCER_ADDRESS:?}
       BATCH_MAX_WAIT_SECS: ${BATCH_MAX_WAIT_SECS:-30}
-      CIRCUIT_PKG: batch_n16
+      CIRCUIT_PKG: batch_repo
     restart: unless-stopped
 
   wallet:

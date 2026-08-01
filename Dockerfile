@@ -52,16 +52,15 @@ COPY --from=builder /app/target/release/wallet-sim /usr/local/bin/wallet-sim
 # Ship the Noir workspace and pre-compile the circuit so runtime only runs
 # execute + prove.
 COPY circuits /app/circuits
-# Bake both deployable batch sizes (CIRCUIT_PKG selects at runtime); the
+# Bake the deployable circuit (CIRCUIT_PKG selects at runtime); the
 # poseidon git dependency gets cloned here so runtime needs no network.
-RUN cd /app/circuits && nargo compile --package batch_n16 && nargo compile --package batch_n4
+RUN cd /app/circuits && nargo compile --package batch_repo
 # Warm bb's CRS cache (downloaded on first use) so runtime proving never
 # needs network. write_vk pulls the same prover CRS as prove but needs no
-# witness (Prover.toml is gitignored, so CI build contexts don't have one);
-# warming the largest circuit (n16, 2^18) covers n4 too.
+# witness (Prover.toml is gitignored, so CI build contexts don't have one).
 RUN cd /app/circuits && mkdir -p /tmp/crs-warm \
     && bb write_vk --scheme ultra_honk --oracle_hash keccak \
-         --bytecode_path target/batch_n16.json --output_path /tmp/crs-warm \
+         --bytecode_path target/batch_repo.json --output_path /tmp/crs-warm \
     && test -s /tmp/crs-warm/vk && rm -rf /tmp/crs-warm
 ENV CIRCUITS_DIR=/app/circuits
 ENV DB_PATH=/data/sequencer.db

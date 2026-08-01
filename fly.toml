@@ -2,11 +2,11 @@
 # bootstrap-generated .env, sets the secret, patches [env], remote-builds).
 #
 # VM sizing is governed by the 5s-cadence requirement (docs/PROVING.md):
-# bb prove(batch_n16) must stay ≤ ~3.5s so every Stellar ledger can carry a
+# bb prove(batch_repo) must stay ≤ ~3.5s so every Stellar ledger can carry a
 # batch. performance-2x is the starting point; `fly scale vm performance-4x`
 # is the knob if the benchmark gate misses.
 app = "cellarium"
-primary_region = "iad"
+primary_region = "ord"
 
 [build]
   dockerfile = "Dockerfile"
@@ -14,17 +14,20 @@ primary_region = "iad"
 [env]
   RPC_URL = "https://soroban-testnet.stellar.org"
   NETWORK_PASSPHRASE = "Test SDF Network ; September 2015"
-  CONTRACT_ID = "CDMSDXQNWYN4ZAP44VFNGPT46HI4NKBYE37L4662PRJ3ZALMHPSWLTSQ"
+  # Public identifiers, patched from .env by scripts/deploy_fly.sh.
+  CONTRACT_ID = "CD2WEN5MRPVG5N7VD5MUMMR6QUIPELNC5ZXW45BDAP4I6VRX3T34GUON"
   TOKEN_ID = "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
-  SEQUENCER_ADDRESS = "GCUCAPHICHEZFTTCNQ56LE6E6S4JJ3FGNYARTP3MBJTXLN2VTONKYY7E"
+  TUST_ID = "CCACGKUNRT364P7SHROESWRK4TY5AOLTRNZUDKFARHF3LQSIU3H3IGXP"
+  ORACLE_ID = "CD3PWN5GYWP5UUUCP74FM6GOEMPU7QXQBHUSAXNAKPUWGZGRHK4D77T3"
+  SEQUENCER_ADDRESS = "GB5JFZJIVTKNBXNIUOZVNUGBOW4IHZRXFDGTBXIZDPXTOAZFSCV3QQSI"
   # 5s-cadence batching: eager trigger reacts within one 2s tick; a lone
-  # payment waits at most 5s.
+  # op waits at most 5s.
   BATCH_MAX_WAIT_SECS = "5"
   TICK_SECS = "2"
-  # batch_n4, matching the VK the live contract was bootstrapped with — a
-  # circuit change requires a re-bootstrap (the VK is contract-immutable)
-  # and a DB reset. Sized for the 5s-cadence budget (docs/PROVING.md §3.5).
-  CIRCUIT_PKG = "batch_n4"
+  # Must match the VK the live contract was bootstrapped with — a circuit
+  # change requires a re-bootstrap (the VK is contract-immutable) and a DB
+  # reset.
+  CIRCUIT_PKG = "batch_repo"
   RUST_LOG = "sequencer=info"
 
 [http_service]

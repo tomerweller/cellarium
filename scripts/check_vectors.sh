@@ -14,9 +14,11 @@ cd "$(dirname "$0")/.."
 echo "==> regenerating vectors from the harness"
 cargo run -q --release -p harness -- vectors-json
 cargo run -q --release -p harness -- noir-tx-vectors
+cargo run -q --release -p harness -- noir-repo-vectors
 
 echo "==> checking for drift vs checked-in copies"
-git diff --exit-code fixtures/vectors.json circuits/lib/src/tx_vectors.nr || {
+git diff --exit-code fixtures/vectors.json circuits/lib/src/tx_vectors.nr \
+  circuits/lib/src/repo_vectors.nr circuits/lib/src/settle_vectors.nr || {
   echo "DRIFT: harness output no longer matches checked-in vectors (see diff above)"
   exit 1
 }
@@ -27,7 +29,8 @@ for key in pad.pk_x pad.pk_y pad.r_x pad.r_y pad.s_lo pad.s_hi; do
   val=$(jq -r ".${key}" fixtures/vectors.json)
   grep -qi "$val" circuits/lib/src/tx.nr || { echo "MISSING in tx.nr: $key = $val"; fail=1; }
 done
-for key in hash2_1_2 hash4_1_2_3_4 empty_root_d8 leaf_1234_100_0 root_leaf_at_5 da_fold_0_42; do
+for key in hash2_1_2 hash4_1_2_3_4 empty_root_d8 bal_hash_100_40 leaf_1234_100_40_0 \
+           root_leaf_at_5 da_fold_0_42 dep2_fold_0_1234_coll_77 wd2_fold_0_1234_coll_77; do
   val=$(jq -r ".${key}" fixtures/vectors.json)
   grep -qri "$val" circuits/lib/src/test.nr || { echo "MISSING in test.nr: $key = $val"; fail=1; }
 done

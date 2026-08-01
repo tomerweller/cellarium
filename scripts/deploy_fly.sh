@@ -15,6 +15,8 @@ echo "==> patching fly.toml [env] with public identifiers"
 sed -i '' \
   -e "s|CONTRACT_ID = \".*\"|CONTRACT_ID = \"$CONTRACT_ID\"|" \
   -e "s|TOKEN_ID = \".*\"|TOKEN_ID = \"$TOKEN_ID\"|" \
+  -e "s|TUST_ID = \".*\"|TUST_ID = \"$TUST_ID\"|" \
+  -e "s|ORACLE_ID = \".*\"|ORACLE_ID = \"$ORACLE_ID\"|" \
   -e "s|SEQUENCER_ADDRESS = \".*\"|SEQUENCER_ADDRESS = \"$SEQUENCER_ADDRESS\"|" \
   fly.toml
 
