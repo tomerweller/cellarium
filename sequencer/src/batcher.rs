@@ -31,7 +31,7 @@ pub async fn run(
         // Fetch the oracle price for this tick: the 7th public input must be
         // exactly what the contract will read at submission.
         let c = client.clone();
-        let price = match tokio::task::spawn_blocking(move || c.oracle_price()).await {
+        let (price, price_ts) = match tokio::task::spawn_blocking(move || c.oracle_price()).await {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
                 tracing::warn!(%e, "oracle price fetch failed; skipping tick");
@@ -42,6 +42,24 @@ pub async fn run(
                 continue;
             }
         };
+        // Mock-oracle heartbeat (PLAN §3: every batch needs a fresh price;
+        // the operator controls the mock oracle). Re-stamp the SAME value
+        // well before the contract's 5-minute staleness bound so proving/
+        // submission never races it. Requires ORACLE_ADMIN_SECRET.
+        if cfg.oracle_admin_secret.is_some() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if now.saturating_sub(price_ts) > 150 {
+                let c = client.clone();
+                match tokio::task::spawn_blocking(move || c.refresh_oracle_price(price)).await {
+                    Ok(Ok(())) => tracing::info!(price, "oracle heartbeat: price re-stamped"),
+                    Ok(Err(e)) => tracing::warn!(%e, "oracle heartbeat failed"),
+                    Err(e) => tracing::error!(%e, "oracle heartbeat task panicked"),
+                }
+            }
+        }
         match try_build(&engine, price).await {
             Ok(Some(job)) => {
                 run_pipeline(&engine, &client, &cfg, job).await;

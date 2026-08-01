@@ -1827,6 +1827,7 @@ mod engine_tests {
                 open_slots: 2,
                 tx_slots,
                 oracle_id: String::new(),
+                oracle_admin_secret: None,
             },
             conn,
             state: L2State::new(),

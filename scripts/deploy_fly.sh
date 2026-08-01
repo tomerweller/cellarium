@@ -20,8 +20,11 @@ sed -i '' \
   -e "s|SEQUENCER_ADDRESS = \".*\"|SEQUENCER_ADDRESS = \"$SEQUENCER_ADDRESS\"|" \
   fly.toml
 
-echo "==> setting SEQUENCER_SECRET (staged; applied with the deploy)"
+echo "==> setting secrets (staged; applied with the deploy)"
 fly secrets set --app "$APP" --stage "SEQUENCER_SECRET=$SEQUENCER_SECRET" >/dev/null
+# The oracle heartbeat: the sequencer re-stamps the mock price before it
+# goes stale (contract rejects prices older than 5 minutes).
+fly secrets set --app "$APP" --stage "ORACLE_ADMIN_SECRET=$ORACLE_ADMIN_SECRET" >/dev/null
 
 echo "==> remote deploy"
 fly deploy --app "$APP" --remote-only

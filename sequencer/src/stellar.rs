@@ -25,9 +25,14 @@ impl From<HexError> for ChainError {
 pub trait StellarClient: Send + Sync {
     fn root(&self) -> Result<Fr, ChainError>;
     fn batch_num(&self) -> Result<u64, ChainError>;
-    /// Current oracle price (XLM-per-tUST x 1e7); bound as the 7th public
-    /// input, so the witness must use exactly what the contract will read.
-    fn oracle_price(&self) -> Result<u64, ChainError>;
+    /// Current oracle price (XLM-per-tUST x 1e7) and its set-timestamp;
+    /// the price is bound as the 7th public input, so the witness must use
+    /// exactly what the contract will read.
+    fn oracle_price(&self) -> Result<(u64, u64), ChainError>;
+    /// Re-stamp the oracle with `price` (same value, fresh ledger timestamp).
+    /// Requires the oracle admin identity; no-op capability check is the
+    /// caller's job.
+    fn refresh_oracle_price(&self, price: u64) -> Result<(), ChainError>;
     fn dep_tail(&self, asset: u32) -> Result<u64, ChainError>;
     fn get_pending_deposit(&self, asset: u32, seq: u64) -> Result<(Fr, u64), ChainError>;
     /// Sign + send submit_batch with the envelope JSON; returns when the CLI
@@ -39,6 +44,8 @@ pub trait StellarClient: Send + Sync {
 /// must never appear on a CLI argv (visible in `ps`/audit logs — issue #2
 /// H4); it reaches the CLI exactly once, via environment, at registration.
 const IDENTITY: &str = "cellarium-seq-runtime";
+/// Oracle admin identity (registered only when ORACLE_ADMIN_SECRET is set).
+const ORACLE_IDENTITY: &str = "cellarium-oracle-runtime";
 
 pub struct CliClient {
     pub rpc_url: String,
@@ -46,6 +53,7 @@ pub struct CliClient {
     pub contract_id: String,
     pub oracle_id: String,
     pub sequencer_address: String,
+    pub has_oracle_admin: bool,
 }
 
 impl CliClient {
@@ -79,12 +87,31 @@ impl CliClient {
                 String::from_utf8_lossy(&o.stdout).trim().to_string()
             }
         };
+        // Register the oracle admin identity if provided (same env-only
+        // secret handling as the sequencer identity).
+        let has_oracle_admin = if let Some(secret) = &cfg.oracle_admin_secret {
+            let o = Command::new("stellar")
+                .args(["keys", "add", ORACLE_IDENTITY, "--secret-key", "--overwrite"])
+                .env("SOROBAN_SECRET_KEY", secret)
+                .env("STELLAR_SECRET_KEY", secret)
+                .output()?;
+            if !o.status.success() {
+                return Err(ChainError::Cli(format!(
+                    "cannot register oracle admin identity: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                )));
+            }
+            true
+        } else {
+            false
+        };
         Ok(CliClient {
             rpc_url: cfg.rpc_url.clone(),
             network_passphrase: cfg.network_passphrase.clone(),
             contract_id: cfg.contract_id.clone(),
             oracle_id: cfg.oracle_id.clone(),
             sequencer_address,
+            has_oracle_admin,
         })
     }
 
@@ -141,18 +168,41 @@ impl StellarClient for CliClient {
         self.read_u64("batch_num")
     }
 
-    fn oracle_price(&self) -> Result<u64, ChainError> {
+    fn oracle_price(&self) -> Result<(u64, u64), ChainError> {
         let out = self.invoke_on(&self.oracle_id.clone(), false, &["lastprice"])?;
         let v: serde_json::Value =
             serde_json::from_str(&out).map_err(|e| ChainError::Parse(e.to_string()))?;
-        let price_str = match &v["price"] {
-            serde_json::Value::String(s) => s.clone(),
-            serde_json::Value::Number(n) => n.to_string(),
-            other => return Err(ChainError::Parse(format!("oracle price: {other}"))),
+        let num = |field: &str| -> Result<u64, ChainError> {
+            let s = match &v[field] {
+                serde_json::Value::String(s) => s.clone(),
+                serde_json::Value::Number(n) => n.to_string(),
+                other => return Err(ChainError::Parse(format!("oracle {field}: {other}"))),
+            };
+            s.parse().map_err(|_| ChainError::Parse(format!("oracle {field}: {s}")))
         };
-        price_str
-            .parse()
-            .map_err(|_| ChainError::Parse(format!("oracle price: {price_str}")))
+        Ok((num("price")?, num("timestamp")?))
+    }
+
+    fn refresh_oracle_price(&self, price: u64) -> Result<(), ChainError> {
+        if !self.has_oracle_admin {
+            return Err(ChainError::Cli("no oracle admin identity configured".into()));
+        }
+        let out = Command::new("stellar")
+            .args([
+                "contract", "invoke", "--id", &self.oracle_id,
+                "--rpc-url", &self.rpc_url,
+                "--network-passphrase", &self.network_passphrase,
+                "--source-account", ORACLE_IDENTITY,
+                "--", "set_price", "--price", &price.to_string(),
+            ])
+            .output()?;
+        if !out.status.success() {
+            return Err(ChainError::Cli(format!(
+                "oracle refresh failed: {}",
+                String::from_utf8_lossy(&out.stderr)
+            )));
+        }
+        Ok(())
     }
 
     fn dep_tail(&self, asset: u32) -> Result<u64, ChainError> {

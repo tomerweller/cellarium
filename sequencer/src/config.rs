@@ -28,6 +28,10 @@ pub struct Config {
     pub tx_slots: usize,
     /// Mock price oracle contract (read every build; PLAN.md 1.5/1.6).
     pub oracle_id: String,
+    /// Optional oracle admin secret: when set, the batcher re-stamps the
+    /// current price whenever it approaches the contract's 5-minute
+    /// staleness bound (the mock oracle needs a heartbeat; PLAN.md §3).
+    pub oracle_admin_secret: Option<String>,
 }
 
 fn var(name: &str) -> Result<String, String> {
@@ -65,6 +69,7 @@ impl Config {
             open_slots,
             tx_slots,
             oracle_id: var("ORACLE_ID")?,
+            oracle_admin_secret: std::env::var("ORACLE_ADMIN_SECRET").ok().filter(|s| !s.is_empty()),
         })
     }
 }

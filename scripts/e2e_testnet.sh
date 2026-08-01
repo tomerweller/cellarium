@@ -59,6 +59,7 @@ echo "    rollup=$ROLLUP"
 
 echo "==> boot sequencer"
 export CONTRACT_ID=$ROLLUP TOKEN_ID=$TOKEN TUST_ID=$TUST ORACLE_ID=$ORACLE SEQUENCER_SECRET=$SEQ_SECRET SEQUENCER_ADDRESS=$SEQ_ADDR
+export ORACLE_ADMIN_SECRET=$SEQ_SECRET  # heartbeat: keep the mock price fresh
 export RPC_URL=https://soroban-testnet.stellar.org
 export NETWORK_PASSPHRASE="Test SDF Network ; September 2015"
 export DB_PATH="$SCRATCH/e2e.db" LISTEN_ADDR="127.0.0.1:$PORT" BATCH_MAX_WAIT_SECS=15
