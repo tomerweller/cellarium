@@ -63,10 +63,12 @@ Date: 2026-07-16. Read-only static analysis; no suites were executed.
 
 | Script | Coverage |
 |---|---|
-| `scripts/e2e_local.sh` | Fixture `batch_n4` against Protocol-26 localnet: deposits → `submit_batch` with real proof → root advance, queue drained, withdrawal payout delta (+100), escrow balance; resource measurements. |
 | `scripts/e2e_testnet.sh` | Full acceptance: fresh contract on testnet, native sequencer boot, deposits → auto-batch credit → signed transfer + withdrawal → root parity (sequencer == chain), DA blob served with proof, **replay idempotency** (nonce-0 resubmit returns original receipt) and **gap-nonce rejection**. Polling with sleeps; ~minutes; exits 1 on any mismatch. |
-| `scripts/smoke_sequencer.sh` | Pipeline smoke; hardcodes a session-specific scratchpad path (stale/fragile — effectively dead). |
 | `scripts/bench_proving.sh` | Benchmarks, not a test. |
+
+(`scripts/e2e_local.sh` and `scripts/smoke_sequencer.sh` were payments-era
+scripts with stale interfaces/paths; both were deleted — issue #39. A hermetic
+localnet E2E is tracked by issue #36.)
 
 None of these run in CI.
 
@@ -140,7 +142,6 @@ Specific untested critical paths (all in `sequencer/src/engine.rs`):
 
 ### Flakiness / determinism risks
 - e2e scripts: sleep-polling against live networks; fine as manual acceptance, unsuitable for CI as-is.
-- `smoke_sequencer.sh` is bound to a stale scratchpad path — dead weight.
 - Fixture drift: fixtures are regenerated manually (`just prove-demo`) with pinned bb 0.87.0/nargo beta.11; nothing detects when checked-in fixtures no longer match the current circuits (a circuit change + forgotten regeneration keeps `cargo test` green against *old* proofs while the deployed system uses a *new* VK).
 - `wallet vectors.test.ts` random-roundtrip loop uses `randScalar` — non-deterministic but harmless (failures would be real bugs).
 
@@ -187,8 +188,8 @@ Shaped for a solo maintainer heading to production: everything fast and hermetic
 - Local: `just check` already covers this when fixtures are regenerated; document `prove-demo && test` as the release ritual.
 
 ### Layer 5 — E2E
-- **Nightly (optional, later):** `e2e_local.sh` against `stellar container start local` in a GitHub-Actions service container — hermetic, no faucets. Needs docker localnet with Protocol 26; medium setup effort.
-- **Manual, pre-release:** `e2e_testnet.sh` stays the acceptance gate (it already asserts deltas, root parity, replay idempotency, gap nonces). Delete or fix `smoke_sequencer.sh` (stale hardcoded paths).
+- **Nightly (optional, later):** a hermetic localnet E2E against `stellar container start local` in a GitHub-Actions service container — no faucets. Needs docker localnet with Protocol 26; medium setup effort (issue #36).
+- **Manual, pre-release:** `e2e_testnet.sh` stays the acceptance gate (it already asserts deltas, root parity, replay idempotency, gap nonces).
 - Never on PR: network flakiness, faucet dependence, minutes of polling.
 
 ### Layer 6 — Wallet
@@ -225,7 +226,7 @@ Shaped for a solo maintainer heading to production: everything fast and hermetic
 10. Wallet API-client tests against `dev/mock-server.mjs` (sign-before-POST, error mapping). Effort: **S–M**.
 11. Localnet e2e in nightly CI (docker Protocol-26 container). Effort: **L**.
 12. Wallet Send-flow component test (@testing-library/react). Effort: **M**.
-13. Watcher/db unit tests; delete stale `smoke_sequencer.sh`. Effort: **S**.
+13. Watcher/db unit tests. Effort: **S**.
 14. TS property tests (fast-check) for encode/decode roundtrips — only if crypto surface grows. Effort: **S**.
 
 ---
@@ -267,5 +268,4 @@ Bugs found and fixed while implementing:
    remediation broke e2e — the nightly drift alarm now automates that check.
 
 Remaining: P2 items (§4) — wallet API-client tests vs the mock server,
-localnet e2e in nightly, Send-flow component test, watcher/db unit tests,
-`smoke_sequencer.sh` cleanup.
+localnet e2e in nightly, Send-flow component test, watcher/db unit tests.

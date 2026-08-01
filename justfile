@@ -46,11 +46,6 @@ prove-demo:
 demo:
     scripts/demo.sh
 
-# Full custody loop against localnet with resource measurements
-# (requires: stellar container start local --protocol-version 26 --limits unlimited)
-e2e-local: build-contract
-    scripts/e2e_local.sh
-
 # Deploy a fresh Cellarium instance to testnet + write .env
 bootstrap:
     scripts/bootstrap_testnet.sh

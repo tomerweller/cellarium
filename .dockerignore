@@ -5,3 +5,15 @@ wallet/dist
 **/*.db-wal
 **/*.db-shm
 .git
+
+# Local secrets and bootstrap artifacts must never enter a build context
+# (Compose and `fly deploy --remote-only` upload the repo root). See issue #12.
+.env
+.env.*
+*.env
+**/*.pem
+**/*.key
+**/*secret*
+**/id_ed25519*
+scratchpad
+.claude
