@@ -28,7 +28,12 @@ pub fn interest(cash: u64, rate_bps: u32, elapsed_secs: u64) -> Option<u64> {
 }
 
 /// The close signing message: P2([DOMAIN_CLOSE, pos_index, pos_leaf, nonce]).
-pub fn close_message(hasher: &Hasher, pos_index: u32, position: &Position, borrower_nonce: u64) -> Fr {
+pub fn close_message(
+    hasher: &Hasher,
+    pos_index: u32,
+    position: &Position,
+    borrower_nonce: u64,
+) -> Fr {
     let leaf = pos_leaf(hasher, position);
     hasher.hash(&[
         fr_from_u64(DOMAIN_CLOSE),
@@ -40,7 +45,10 @@ pub fn close_message(hasher: &Hasher, pos_index: u32, position: &Position, borro
 
 /// The DA record for a default/liquidation: P2([pos_index, is_liquidation]).
 pub fn liq_record(hasher: &Hasher, pos_index: u32, is_liquidation: bool) -> Fr {
-    hasher.hash2(fr_from_u64(pos_index as u64), fr_from_u64(is_liquidation as u64))
+    hasher.hash2(
+        fr_from_u64(pos_index as u64),
+        fr_from_u64(is_liquidation as u64),
+    )
 }
 
 /// Margin-breach predicate at the batch price, division-free (PLAN.md 6.1.1):
@@ -106,22 +114,50 @@ pub struct LiqEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettleError {
-    PositionNotFound { index: usize },
-    BorrowerNotFound { index: usize },
-    LenderNotFound { index: usize },
-    NonceMismatch { index: usize, expected: u64, got: u64 },
-    BadSignature { index: usize },
-    PastMaturity { index: usize },
-    NotPastMaturity { index: usize },
-    MarginHealthy { index: usize },
-    InsufficientCash { index: usize, available: u64, needed: u64 },
-    BalanceOverflow { index: usize },
+    PositionNotFound {
+        index: usize,
+    },
+    BorrowerNotFound {
+        index: usize,
+    },
+    LenderNotFound {
+        index: usize,
+    },
+    NonceMismatch {
+        index: usize,
+        expected: u64,
+        got: u64,
+    },
+    BadSignature {
+        index: usize,
+    },
+    PastMaturity {
+        index: usize,
+    },
+    NotPastMaturity {
+        index: usize,
+    },
+    MarginHealthy {
+        index: usize,
+    },
+    InsufficientCash {
+        index: usize,
+        available: u64,
+        needed: u64,
+    },
+    BalanceOverflow {
+        index: usize,
+    },
     /// The position's open_ts postdates batch_ts (issue #1 M4): elapsed
     /// would underflow and the close is unprovable in-circuit.
-    FutureOpenTs { index: usize },
+    FutureOpenTs {
+        index: usize,
+    },
     /// cash * rate * elapsed overflows or interest exceeds u64 (issue #1
     /// L7): unprovable terms; must not panic the engine thread.
-    InterestOverflow { index: usize },
+    InterestOverflow {
+        index: usize,
+    },
 }
 
 impl std::fmt::Display for SettleError {
@@ -295,7 +331,12 @@ pub fn apply_liq(
     let pos_siblings = state.positions.path(hasher, req.pos_index);
     state.positions.remove(req.pos_index);
 
-    *da_acc = fold3(hasher, DOMAIN_DA, *da_acc, liq_record(hasher, req.pos_index, req.is_liquidation));
+    *da_acc = fold3(
+        hasher,
+        DOMAIN_DA,
+        *da_acc,
+        liq_record(hasher, req.pos_index, req.is_liquidation),
+    );
 
     Ok(LiqEntry {
         position: position.clone(),

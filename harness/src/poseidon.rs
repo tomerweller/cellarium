@@ -4,7 +4,7 @@
 //! in-circuit).
 
 use soroban_poseidon::poseidon2_hash;
-use soroban_sdk::{crypto::BnScalar, Bytes, Env, U256, Vec as SVec};
+use soroban_sdk::{crypto::BnScalar, Bytes, Env, Vec as SVec, U256};
 
 /// A BN254 scalar-field element, 32-byte big-endian canonical encoding.
 pub type Fr = [u8; 32];

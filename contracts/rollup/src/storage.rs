@@ -42,7 +42,10 @@ pub fn set_token(env: &Env, asset: u32, token: &Address) {
 }
 
 pub fn get_token(env: &Env, asset: u32) -> Address {
-    env.storage().instance().get(&DataKey::Token(asset)).unwrap()
+    env.storage()
+        .instance()
+        .get(&DataKey::Token(asset))
+        .unwrap()
 }
 
 pub fn set_operator(env: &Env, operator: &Address) {
@@ -82,26 +85,42 @@ pub fn set_batch_num(env: &Env, n: u64) {
 }
 
 pub fn get_batch_num(env: &Env) -> u64 {
-    env.storage().instance().get(&DataKey::BatchNum).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get(&DataKey::BatchNum)
+        .unwrap_or(0)
 }
 
 pub fn dep_head(env: &Env, asset: u32) -> u64 {
-    env.storage().instance().get(&DataKey::DepHead(asset)).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get(&DataKey::DepHead(asset))
+        .unwrap_or(0)
 }
 
 pub fn dep_tail(env: &Env, asset: u32) -> u64 {
-    env.storage().instance().get(&DataKey::DepTail(asset)).unwrap_or(0)
+    env.storage()
+        .instance()
+        .get(&DataKey::DepTail(asset))
+        .unwrap_or(0)
 }
 
 pub fn enqueue_deposit(env: &Env, asset: u32, dep: &PendingDeposit) -> u64 {
     let tail = dep_tail(env, asset);
-    env.storage().persistent().set(&DataKey::Dep(asset, tail), dep);
-    env.storage().instance().set(&DataKey::DepTail(asset), &(tail + 1));
+    env.storage()
+        .persistent()
+        .set(&DataKey::Dep(asset, tail), dep);
+    env.storage()
+        .instance()
+        .set(&DataKey::DepTail(asset), &(tail + 1));
     tail
 }
 
 pub fn get_deposit(env: &Env, asset: u32, seq: u64) -> PendingDeposit {
-    env.storage().persistent().get(&DataKey::Dep(asset, seq)).unwrap()
+    env.storage()
+        .persistent()
+        .get(&DataKey::Dep(asset, seq))
+        .unwrap()
 }
 
 pub fn dequeue_deposits(env: &Env, asset: u32, count: u64) {
@@ -109,5 +128,7 @@ pub fn dequeue_deposits(env: &Env, asset: u32, count: u64) {
     for seq in head..head + count {
         env.storage().persistent().remove(&DataKey::Dep(asset, seq));
     }
-    env.storage().instance().set(&DataKey::DepHead(asset), &(head + count));
+    env.storage()
+        .instance()
+        .set(&DataKey::DepHead(asset), &(head + count));
 }

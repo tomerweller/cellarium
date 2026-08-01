@@ -58,15 +58,31 @@ fn setup() -> Setup<'static> {
     let genesis = BytesN::from_array(&env, &hex32(meta["old_state_root"].as_str().unwrap()));
     let operator = Address::generate(&env);
     // Pin the fixture's instance address (8th PI, issue #1 L10).
-    let instance_addr =
-        Address::from_string(&SString::from_str(&env, meta["instance_addr"].as_str().unwrap()));
+    let instance_addr = Address::from_string(&SString::from_str(
+        &env,
+        meta["instance_addr"].as_str().unwrap(),
+    ));
     let rollup_id = env.register_at(
         &instance_addr,
         RollupContract,
-        (cash_sac.address(), coll_sac.address(), oracle_id, operator.clone(), vk, genesis),
+        (
+            cash_sac.address(),
+            coll_sac.address(),
+            oracle_id,
+            operator.clone(),
+            vk,
+            genesis,
+        ),
     );
     let rollup = RollupContractClient::new(&env, &rollup_id);
-    Setup { env: env.clone(), rollup, funder, operator, meta, batch_ts }
+    Setup {
+        env: env.clone(),
+        rollup,
+        funder,
+        operator,
+        meta,
+        batch_ts,
+    }
 }
 
 fn envelope_with_withdrawals(s: &Setup, wds: Vec<Withdrawal>) -> BatchEnvelope {
@@ -88,16 +104,28 @@ fn five_withdrawals_rejected() {
     let s = setup();
     let mut wds = vec![&s.env];
     for _ in 0..5 {
-        wds.push_back(Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: 1 });
+        wds.push_back(Withdrawal {
+            dest: Address::generate(&s.env),
+            asset: ASSET_CASH,
+            amount: 1,
+        });
     }
-    let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
+    let r = s
+        .rollup
+        .try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
     assert_eq!(r, Err(Ok(RollupError::TooManyWithdrawals)));
     // Exactly 4 passes the bound (and then fails later, at verification).
     let mut wds = vec![&s.env];
     for _ in 0..4 {
-        wds.push_back(Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: 1 });
+        wds.push_back(Withdrawal {
+            dest: Address::generate(&s.env),
+            asset: ASSET_CASH,
+            amount: 1,
+        });
     }
-    let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
+    let r = s
+        .rollup
+        .try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
     assert_eq!(r, Err(Ok(RollupError::VerificationFailed)));
 }
 
@@ -107,10 +135,20 @@ fn withdrawal_amount_bounds() {
     for bad in [0i128, -5, (u64::MAX as i128) + 1] {
         let wds = vec![
             &s.env,
-            Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: bad },
+            Withdrawal {
+                dest: Address::generate(&s.env),
+                asset: ASSET_CASH,
+                amount: bad,
+            },
         ];
-        let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
-        assert_eq!(r, Err(Ok(RollupError::InvalidAmount)), "amount {bad} must be rejected");
+        let r = s
+            .rollup
+            .try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
+        assert_eq!(
+            r,
+            Err(Ok(RollupError::InvalidAmount)),
+            "amount {bad} must be rejected"
+        );
     }
 }
 
@@ -119,9 +157,15 @@ fn withdrawal_asset_bounds() {
     let s = setup();
     let wds = vec![
         &s.env,
-        Withdrawal { dest: Address::generate(&s.env), asset: 2, amount: 1 },
+        Withdrawal {
+            dest: Address::generate(&s.env),
+            asset: 2,
+            amount: 1,
+        },
     ];
-    let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
+    let r = s
+        .rollup
+        .try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
     assert_eq!(r, Err(Ok(RollupError::InvalidAsset)));
 }
 
@@ -141,7 +185,10 @@ fn fixture_envelope(s: &Setup) -> BatchEnvelope {
                 amount: wd["amount"].as_i64().unwrap() as i128,
             },
         ],
-        da_commitment: BytesN::from_array(&s.env, &hex32(s.meta["da_commitment"].as_str().unwrap())),
+        da_commitment: BytesN::from_array(
+            &s.env,
+            &hex32(s.meta["da_commitment"].as_str().unwrap()),
+        ),
         proof: Bytes::from_slice(&s.env, PROOF),
     }
 }
@@ -152,8 +199,14 @@ fn fixture_envelope(s: &Setup) -> BatchEnvelope {
 #[test]
 fn partial_queue_consumption_across_batches() {
     let s = setup();
-    let alice_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()));
-    let bob_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()));
+    let alice_pk = BytesN::from_array(
+        &s.env,
+        &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()),
+    );
+    let bob_pk = BytesN::from_array(
+        &s.env,
+        &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()),
+    );
     let carol_pk = BytesN::from_array(&s.env, &{
         let mut a = [0u8; 32];
         a[31] = 9; // canonical, nonzero, not PAD
@@ -162,17 +215,37 @@ fn partial_queue_consumption_across_batches() {
 
     // Queue three (alice cash, bob coll, carol cash); the fixture batch
     // consumes exactly (1 cash, 1 coll) — carol's cash entry must survive.
-    s.rollup.deposit(&s.funder, &alice_pk, &ASSET_CASH, &10_000_000);
-    s.rollup.deposit(&s.funder, &bob_pk, &ASSET_COLL, &5_000_000);
+    s.rollup
+        .deposit(&s.funder, &alice_pk, &ASSET_CASH, &10_000_000);
+    s.rollup
+        .deposit(&s.funder, &bob_pk, &ASSET_COLL, &5_000_000);
     s.rollup.deposit(&s.funder, &carol_pk, &ASSET_CASH, &700);
-    assert_eq!((s.rollup.dep_head(&ASSET_CASH), s.rollup.dep_tail(&ASSET_CASH)), (0, 2));
+    assert_eq!(
+        (
+            s.rollup.dep_head(&ASSET_CASH),
+            s.rollup.dep_tail(&ASSET_CASH)
+        ),
+        (0, 2)
+    );
 
     let envelope = fixture_envelope(&s);
     s.env.cost_estimate().budget().reset_unlimited();
     s.rollup.submit_batch(&s.operator, &envelope);
 
-    assert_eq!((s.rollup.dep_head(&ASSET_CASH), s.rollup.dep_tail(&ASSET_CASH)), (1, 2));
-    assert_eq!((s.rollup.dep_head(&ASSET_COLL), s.rollup.dep_tail(&ASSET_COLL)), (1, 1));
+    assert_eq!(
+        (
+            s.rollup.dep_head(&ASSET_CASH),
+            s.rollup.dep_tail(&ASSET_CASH)
+        ),
+        (1, 2)
+    );
+    assert_eq!(
+        (
+            s.rollup.dep_head(&ASSET_COLL),
+            s.rollup.dep_tail(&ASSET_COLL)
+        ),
+        (1, 1)
+    );
     assert_eq!(s.rollup.get_pending_deposit(&ASSET_CASH, &1).amount, 700);
     assert!(s.rollup.try_get_pending_deposit(&ASSET_CASH, &0).is_err());
     assert!(s.rollup.try_get_pending_deposit(&ASSET_COLL, &0).is_err());
@@ -197,19 +270,29 @@ fn cross_instance_replay_rejected() {
     OracleContractClient::new(&s.env, &oracle_id).set_price(&price);
 
     let vk = Bytes::from_slice(&s.env, VK);
-    let genesis =
-        BytesN::from_array(&s.env, &hex32(s.meta["old_state_root"].as_str().unwrap()));
+    let genesis = BytesN::from_array(&s.env, &hex32(s.meta["old_state_root"].as_str().unwrap()));
     let clone_id = s.env.register(
         RollupContract,
-        (cash_sac.address(), coll_sac.address(), oracle_id, s.operator.clone(), vk, genesis),
+        (
+            cash_sac.address(),
+            coll_sac.address(),
+            oracle_id,
+            s.operator.clone(),
+            vk,
+            genesis,
+        ),
     );
     let clone = RollupContractClient::new(&s.env, &clone_id);
 
     // Same deposits, same envelope, same operator — different instance.
-    let alice_pk =
-        BytesN::from_array(&s.env, &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()));
-    let bob_pk =
-        BytesN::from_array(&s.env, &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()));
+    let alice_pk = BytesN::from_array(
+        &s.env,
+        &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()),
+    );
+    let bob_pk = BytesN::from_array(
+        &s.env,
+        &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()),
+    );
     clone.deposit(&s.funder, &alice_pk, &ASSET_CASH, &10_000_000);
     clone.deposit(&s.funder, &bob_pk, &ASSET_COLL, &5_000_000);
     let envelope = fixture_envelope(&s);
@@ -240,10 +323,18 @@ fn deposit_refund_after_timeout() {
     // Age past the refund delay; anyone may now trigger the refund and the
     // funds go back to the recorded depositor.
     let now = s.env.ledger().timestamp();
-    s.env.ledger().with_mut(|l| l.timestamp = now + rollup::REFUND_DELAY_SECS + 1);
+    s.env
+        .ledger()
+        .with_mut(|l| l.timestamp = now + rollup::REFUND_DELAY_SECS + 1);
     assert_eq!(s.rollup.refund_deposit(&ASSET_CASH), 0);
     assert_eq!(token_balance(&s, &s.funder), funder_before);
-    assert_eq!((s.rollup.dep_head(&ASSET_CASH), s.rollup.dep_tail(&ASSET_CASH)), (1, 1));
+    assert_eq!(
+        (
+            s.rollup.dep_head(&ASSET_CASH),
+            s.rollup.dep_tail(&ASSET_CASH)
+        ),
+        (1, 1)
+    );
 
     // Nothing left to refund.
     let r = s.rollup.try_refund_deposit(&ASSET_CASH);
@@ -264,10 +355,18 @@ fn token_balance(s: &Setup, who: &Address) -> i128 {
 #[test]
 fn submit_requires_pinned_operator() {
     let s = setup();
-    let alice_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()));
-    let bob_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()));
-    s.rollup.deposit(&s.funder, &alice_pk, &ASSET_CASH, &10_000_000);
-    s.rollup.deposit(&s.funder, &bob_pk, &ASSET_COLL, &5_000_000);
+    let alice_pk = BytesN::from_array(
+        &s.env,
+        &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()),
+    );
+    let bob_pk = BytesN::from_array(
+        &s.env,
+        &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()),
+    );
+    s.rollup
+        .deposit(&s.funder, &alice_pk, &ASSET_CASH, &10_000_000);
+    s.rollup
+        .deposit(&s.funder, &bob_pk, &ASSET_COLL, &5_000_000);
 
     let envelope = fixture_envelope(&s);
     let random_third_party = Address::generate(&s.env);

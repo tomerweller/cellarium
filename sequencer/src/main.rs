@@ -82,11 +82,19 @@ async fn run() -> Result<(), String> {
         dep_cursors,
         health.clone(),
     ));
-    let batcher_task =
-        tokio::spawn(batcher::run(engine.clone(), client.clone(), cfg.clone(), health.clone()));
+    let batcher_task = tokio::spawn(batcher::run(
+        engine.clone(),
+        client.clone(),
+        cfg.clone(),
+        health.clone(),
+    ));
 
     // HTTP server.
-    let state = api::AppState { engine, cfg: cfg.clone(), health };
+    let state = api::AppState {
+        engine,
+        cfg: cfg.clone(),
+        health,
+    };
     let app = api::router(state);
     let listener = tokio::net::TcpListener::bind(&cfg.listen_addr)
         .await

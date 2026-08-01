@@ -153,7 +153,8 @@ where
     engine
         .send(build(tx))
         .map_err(|_| ApiError::Internal("engine offline".into()))?;
-    rx.await.map_err(|_| ApiError::Internal("engine dropped reply".into()))?
+    rx.await
+        .map_err(|_| ApiError::Internal("engine dropped reply".into()))?
 }
 
 /// Infallible variant for status/batch reads.
@@ -165,7 +166,8 @@ where
     engine
         .send(build(tx))
         .map_err(|_| ApiError::Internal("engine offline".into()))?;
-    rx.await.map_err(|_| ApiError::Internal("engine dropped reply".into()))
+    rx.await
+        .map_err(|_| ApiError::Internal("engine dropped reply".into()))
 }
 
 pub fn router(state: AppState) -> Router {
@@ -185,11 +187,13 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/intent",
-            post(post_intent).route_layer(middleware::from_fn_with_state(limiter.clone(), rate_limit)),
+            post(post_intent)
+                .route_layer(middleware::from_fn_with_state(limiter.clone(), rate_limit)),
         )
         .route(
             "/intent/{id}/accept",
-            post(post_accept).route_layer(middleware::from_fn_with_state(limiter.clone(), rate_limit)),
+            post(post_accept)
+                .route_layer(middleware::from_fn_with_state(limiter.clone(), rate_limit)),
         )
         .route(
             "/close",
@@ -341,7 +345,11 @@ async fn get_readyz(State(st): State<AppState>) -> Response {
         "batcher": { "ok": batcher_ok, "age_secs": batcher_age },
         "cli_timeouts": crate::stellar::TIMEOUT_COUNT.load(std::sync::atomic::Ordering::Relaxed),
     }));
-    let code = if ready { StatusCode::OK } else { StatusCode::SERVICE_UNAVAILABLE };
+    let code = if ready {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
     (code, body).into_response()
 }
 

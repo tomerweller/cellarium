@@ -39,7 +39,10 @@ pub async fn run(
     // Resume any batch left mid-pipeline by a crash before the normal loop.
     if let Some((batch_num, status, batch_ts, new_root)) = inflight(&engine).await {
         tracing::info!(batch_num, %status, "resuming inflight batch on boot");
-        resume(&engine, &client, &cfg, batch_num, &status, batch_ts, new_root).await;
+        resume(
+            &engine, &client, &cfg, batch_num, &status, batch_ts, new_root,
+        )
+        .await;
     }
 
     let mut interval = tokio::time::interval(Duration::from_secs(cfg.tick_secs));
@@ -203,18 +206,20 @@ enum Landed {
     No,
 }
 
-async fn landed(
-    client: &Arc<dyn StellarClient>,
-    batch_num: u64,
-    new_root: &Fr,
-) -> Option<Landed> {
+async fn landed(client: &Arc<dyn StellarClient>, batch_num: u64, new_root: &Fr) -> Option<Landed> {
     let c = client.clone();
-    let chain_bn = tokio::task::spawn_blocking(move || c.batch_num()).await.ok()?.ok()?;
+    let chain_bn = tokio::task::spawn_blocking(move || c.batch_num())
+        .await
+        .ok()?
+        .ok()?;
     if chain_bn < batch_num {
         return Some(Landed::No);
     }
     let c = client.clone();
-    let chain_root = tokio::task::spawn_blocking(move || c.root()).await.ok()?.ok()?;
+    let chain_root = tokio::task::spawn_blocking(move || c.root())
+        .await
+        .ok()?
+        .ok()?;
     if chain_root == *new_root {
         Some(Landed::Ours)
     } else {
@@ -266,7 +271,10 @@ async fn confirm(
             }
         }
     }
-    tracing::warn!(batch_num, "confirmation timed out; boot recovery will re-check");
+    tracing::warn!(
+        batch_num,
+        "confirmation timed out; boot recovery will re-check"
+    );
 }
 
 async fn resume(
@@ -294,7 +302,11 @@ async fn resume(
                     halt_on_foreign_root(batch_num, &new_root, &chain_root);
                 }
                 Some(Landed::No) => {
-                    tracing::warn!(batch_num, batch_ts, "resume: timestamp window lapsed; rebuilding");
+                    tracing::warn!(
+                        batch_num,
+                        batch_ts,
+                        "resume: timestamp window lapsed; rebuilding"
+                    );
                     fail(engine, batch_num, "timestamp window lapsed").await;
                 }
                 None => {
@@ -338,7 +350,10 @@ async fn inflight(engine: &mpsc::Sender<Command>) -> Option<(u64, String, u64, F
     rx.await.ok().flatten()
 }
 
-async fn try_build(engine: &mpsc::Sender<Command>, price: u64) -> Result<Option<BatchJob>, ApiError> {
+async fn try_build(
+    engine: &mpsc::Sender<Command>,
+    price: u64,
+) -> Result<Option<BatchJob>, ApiError> {
     ask_r(engine, |r| Command::TryBuildBatch(price, r)).await
 }
 
@@ -350,13 +365,22 @@ async fn record_proof(
 ) -> Result<String, ApiError> {
     let (tx, rx) = oneshot::channel();
     engine
-        .send(Command::RecordProof { batch_num, proof, public_inputs, reply: tx })
+        .send(Command::RecordProof {
+            batch_num,
+            proof,
+            public_inputs,
+            reply: tx,
+        })
         .map_err(|_| ApiError::Internal("engine offline".into()))?;
-    rx.await.map_err(|_| ApiError::Internal("engine dropped reply".into()))?
+    rx.await
+        .map_err(|_| ApiError::Internal("engine dropped reply".into()))?
 }
 
 async fn fail(engine: &mpsc::Sender<Command>, batch_num: u64, reason: &str) {
-    let _ = ask(engine, |r| Command::FailBatch(batch_num, reason.to_string(), r)).await;
+    let _ = ask(engine, |r| {
+        Command::FailBatch(batch_num, reason.to_string(), r)
+    })
+    .await;
 }
 
 async fn ask<T, F>(engine: &mpsc::Sender<Command>, build: F) -> Result<T, ApiError>
@@ -367,7 +391,8 @@ where
     engine
         .send(build(tx))
         .map_err(|_| ApiError::Internal("engine offline".into()))?;
-    rx.await.map_err(|_| ApiError::Internal("engine dropped reply".into()))?
+    rx.await
+        .map_err(|_| ApiError::Internal("engine dropped reply".into()))?
 }
 
 async fn ask_r<T, F>(engine: &mpsc::Sender<Command>, build: F) -> Result<T, ApiError>
@@ -390,10 +415,18 @@ mod tests {
     }
     impl StellarClient for MockChain {
         fn root(&self) -> Result<Fr, ChainError> {
-            if self.reachable { Ok(fr_from_u64(0)) } else { Err(ChainError::Cli("down".into())) }
+            if self.reachable {
+                Ok(fr_from_u64(0))
+            } else {
+                Err(ChainError::Cli("down".into()))
+            }
         }
         fn batch_num(&self) -> Result<u64, ChainError> {
-            if self.reachable { Ok(0) } else { Err(ChainError::Cli("down".into())) }
+            if self.reachable {
+                Ok(0)
+            } else {
+                Err(ChainError::Cli("down".into()))
+            }
         }
         fn oracle_price(&self) -> Result<(u64, u64), ChainError> {
             Err(ChainError::Cli("unused".into()))
@@ -402,6 +435,9 @@ mod tests {
             Err(ChainError::Cli("unused".into()))
         }
         fn dep_tail(&self, _asset: u32) -> Result<u64, ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
+        fn dep_head(&self, _asset: u32) -> Result<u64, ChainError> {
             Err(ChainError::Cli("unused".into()))
         }
         fn get_pending_deposit(&self, _asset: u32, _seq: u64) -> Result<(Fr, u64), ChainError> {
@@ -446,7 +482,10 @@ mod tests {
         let (tx, rx) = mpsc::channel::<Command>();
         let client: Arc<dyn StellarClient> = Arc::new(MockChain { reachable: false });
         resume(&tx, &client, &test_cfg(), 7, "submitted", 0, fr_from_u64(1)).await;
-        assert!(rx.try_recv().is_err(), "lapsed batch was acted on despite unknown chain state");
+        assert!(
+            rx.try_recv().is_err(),
+            "lapsed batch was acted on despite unknown chain state"
+        );
     }
 
     /// Confirmed non-landing (counter below ours) still fails + requeues.

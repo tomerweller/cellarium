@@ -27,17 +27,35 @@ pub const DOMAIN_AUTH: u64 = 13;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BuildError {
-    SenderNotFound { tx_index: usize },
-    NonceMismatch { tx_index: usize, expected: u64, got: u64 },
-    InsufficientBalance { tx_index: usize, balance: u64, amount: u64 },
-    RecipientNotFound { tx_index: usize },
-    BadSignature { tx_index: usize },
+    SenderNotFound {
+        tx_index: usize,
+    },
+    NonceMismatch {
+        tx_index: usize,
+        expected: u64,
+        got: u64,
+    },
+    InsufficientBalance {
+        tx_index: usize,
+        balance: u64,
+        amount: u64,
+    },
+    RecipientNotFound {
+        tx_index: usize,
+    },
+    BadSignature {
+        tx_index: usize,
+    },
     ZeroDepositPk,
     ZeroAmount,
     /// Deposit/spend targets the public padding keypair (sk=7) — forbidden.
     ReservedPaddingPk,
-    DepositPkMismatch { deposit_index: usize },
-    BalanceOverflow { deposit_index: usize },
+    DepositPkMismatch {
+        deposit_index: usize,
+    },
+    BalanceOverflow {
+        deposit_index: usize,
+    },
     /// Deposits not ordered cash-prefix-then-coll-prefix (contract fold order).
     DepositOrder,
     TreeFull,
@@ -186,7 +204,15 @@ pub fn make_signed_tx(
     is_withdraw: bool,
     rng: &mut impl rand::RngCore,
 ) -> SignedTx {
-    let msg = tx_message(hasher, from.pk_x(), to_field, asset, amount, nonce, is_withdraw);
+    let msg = tx_message(
+        hasher,
+        from.pk_x(),
+        to_field,
+        asset,
+        amount,
+        nonce,
+        is_withdraw,
+    );
     SignedTx {
         from_pk_x: from.pk_x(),
         from_pk_y: from.pk_y(),
@@ -249,7 +275,12 @@ pub fn build_batch(
         let (siblings, _) = tree.path(hasher, index);
         let new = match &old {
             None => {
-                let mut a = Account { pk_x: req.pk_x, cash: 0, coll: 0, nonce: 0 };
+                let mut a = Account {
+                    pk_x: req.pk_x,
+                    cash: 0,
+                    coll: 0,
+                    nonce: 0,
+                };
                 *a.balance_mut(req.asset) = req.amount;
                 a
             }
@@ -311,7 +342,11 @@ pub fn build_batch(
             .ok_or(BuildError::SenderNotFound { tx_index: i })?;
         let sender = tree.get(from_index).cloned().unwrap();
         if sender.nonce != req.nonce {
-            return Err(BuildError::NonceMismatch { tx_index: i, expected: sender.nonce, got: req.nonce });
+            return Err(BuildError::NonceMismatch {
+                tx_index: i,
+                expected: sender.nonce,
+                got: req.nonce,
+            });
         }
         if sender.balance(req.asset) < req.amount {
             return Err(BuildError::InsufficientBalance {
@@ -323,7 +358,15 @@ pub fn build_batch(
 
         // Belt-and-braces signature check (the circuit is the final arbiter,
         // but an unprovable batch must never reach the prover).
-        let msg = tx_message(hasher, req.from_pk_x, req.to_field, req.asset, req.amount, req.nonce, req.is_withdraw);
+        let msg = tx_message(
+            hasher,
+            req.from_pk_x,
+            req.to_field,
+            req.asset,
+            req.amount,
+            req.nonce,
+            req.is_withdraw,
+        );
         let pk = pk_from_coords(&req.from_pk_x, &req.from_pk_y)
             .ok_or(BuildError::BadSignature { tx_index: i })?;
         if !verify(hasher, &pk, msg, &req.sig) {
@@ -451,10 +494,15 @@ mod tests {
     }
 
     fn dep(pk_x: Fr, asset: Asset, amount: u64) -> DepositRequest {
-        DepositRequest { pk_x, asset, amount }
+        DepositRequest {
+            pk_x,
+            asset,
+            amount,
+        }
     }
 
     /// Deterministically signed tx (fixed k per call site).
+    #[allow(clippy::too_many_arguments)]
     fn signed(
         hasher: &Hasher,
         from: &Keypair,
@@ -487,9 +535,36 @@ mod tests {
             dep(bob.pk_x(), Asset::Coll, 500_000),
         ];
         let txs = vec![
-            signed(hasher, &alice, bob.pk_x(), Asset::Cash, 250_000, 0, false, 11),
-            signed(hasher, &bob, alice.pk_x(), Asset::Coll, 150_000, 0, false, 12),
-            signed(hasher, &bob, fr_from_u64(770_007), Asset::Coll, 100_000, 1, true, 13),
+            signed(
+                hasher,
+                &alice,
+                bob.pk_x(),
+                Asset::Cash,
+                250_000,
+                0,
+                false,
+                11,
+            ),
+            signed(
+                hasher,
+                &bob,
+                alice.pk_x(),
+                Asset::Coll,
+                150_000,
+                0,
+                false,
+                12,
+            ),
+            signed(
+                hasher,
+                &bob,
+                fr_from_u64(770_007),
+                Asset::Coll,
+                100_000,
+                1,
+                true,
+                13,
+            ),
         ];
         (Tree::new(), deposits, txs)
     }
@@ -510,7 +585,15 @@ mod tests {
         let mut wd_acc = FR_ZERO;
         let mut da_acc = FR_ZERO;
         for t in &txs {
-            let msg = tx_message(&hasher, t.from_pk_x, t.to_field, t.asset, t.amount, t.nonce, t.is_withdraw);
+            let msg = tx_message(
+                &hasher,
+                t.from_pk_x,
+                t.to_field,
+                t.asset,
+                t.amount,
+                t.nonce,
+                t.is_withdraw,
+            );
             if t.is_withdraw {
                 wd_acc = wd_fold(&hasher, wd_acc, t.to_field, t.asset, t.amount);
             }
@@ -522,8 +605,24 @@ mod tests {
         // Root recomputed by applying the same ops to an independent tree.
         let (alice, bob) = keys();
         let mut expect = Tree::new();
-        expect.set(0, Account { pk_x: alice.pk_x(), cash: 750_000, coll: 150_000, nonce: 1 });
-        expect.set(1, Account { pk_x: bob.pk_x(), cash: 250_000, coll: 250_000, nonce: 2 });
+        expect.set(
+            0,
+            Account {
+                pk_x: alice.pk_x(),
+                cash: 750_000,
+                coll: 150_000,
+                nonce: 1,
+            },
+        );
+        expect.set(
+            1,
+            Account {
+                pk_x: bob.pk_x(),
+                cash: 250_000,
+                coll: 250_000,
+                nonce: 2,
+            },
+        );
         assert_eq!(w.new_root, expect.root(&hasher));
         assert_eq!(w.old_root, Tree::new().root(&hasher));
     }
@@ -550,7 +649,10 @@ mod tests {
         for t in &a.txs[3..] {
             assert!(!t.is_active);
             assert_eq!(t.from_index, 0);
-            assert_eq!((t.sig.r_x, t.sig.r_y, t.sig.s), (pad_sig.r_x, pad_sig.r_y, pad_sig.s));
+            assert_eq!(
+                (t.sig.r_x, t.sig.r_y, t.sig.s),
+                (pad_sig.r_x, pad_sig.r_y, pad_sig.s)
+            );
         }
         // Padding must not contribute to any fold: rebuild without padding.
         let (mut t3, ..) = scenario(&hasher);
@@ -574,7 +676,15 @@ mod tests {
                 &hasher,
                 DOMAIN_DA,
                 acc,
-                tx_message(&hasher, t.from_pk_x, t.to_field, t.asset, t.amount, t.nonce, t.is_withdraw),
+                tx_message(
+                    &hasher,
+                    t.from_pk_x,
+                    t.to_field,
+                    t.asset,
+                    t.amount,
+                    t.nonce,
+                    t.is_withdraw,
+                ),
             );
         }
         assert_eq!(acc, w.da_commitment);
@@ -589,8 +699,24 @@ mod tests {
         // Each case: (tree setup, deposits, txs) -> expected error.
         let fresh = |dep_reqs: Vec<DepositRequest>, txs: Vec<SignedTx>| {
             let mut tree = Tree::new();
-            tree.set(0, Account { pk_x: alice.pk_x(), cash: 1_000_000, coll: 300, nonce: 0 });
-            tree.set(1, Account { pk_x: bob.pk_x(), cash: 500_000, coll: 0, nonce: 0 });
+            tree.set(
+                0,
+                Account {
+                    pk_x: alice.pk_x(),
+                    cash: 1_000_000,
+                    coll: 300,
+                    nonce: 0,
+                },
+            );
+            tree.set(
+                1,
+                Account {
+                    pk_x: bob.pk_x(),
+                    cash: 500_000,
+                    coll: 0,
+                    nonce: 0,
+                },
+            );
             build_batch(&hasher, &mut tree, 4, 4, &dep_reqs, &txs)
         };
 
@@ -610,7 +736,10 @@ mod tests {
         // Coll before cash violates the contract's fold order.
         assert_eq!(
             fresh(
-                vec![dep(alice.pk_x(), Asset::Coll, 5), dep(bob.pk_x(), Asset::Cash, 5)],
+                vec![
+                    dep(alice.pk_x(), Asset::Coll, 5),
+                    dep(bob.pk_x(), Asset::Cash, 5)
+                ],
                 vec![]
             )
             .unwrap_err(),
@@ -620,9 +749,24 @@ mod tests {
         assert_eq!(
             {
                 let mut tree = Tree::new();
-                tree.set(0, Account { pk_x: alice.pk_x(), cash: 0, coll: u64::MAX - 1, nonce: 0 });
-                build_batch(&hasher, &mut tree, 2, 2, &[dep(alice.pk_x(), Asset::Coll, 2)], &[])
-                    .unwrap_err()
+                tree.set(
+                    0,
+                    Account {
+                        pk_x: alice.pk_x(),
+                        cash: 0,
+                        coll: u64::MAX - 1,
+                        nonce: 0,
+                    },
+                );
+                build_batch(
+                    &hasher,
+                    &mut tree,
+                    2,
+                    2,
+                    &[dep(alice.pk_x(), Asset::Coll, 2)],
+                    &[],
+                )
+                .unwrap_err()
             },
             BuildError::BalanceOverflow { deposit_index: 0 }
         );
@@ -630,46 +774,147 @@ mod tests {
         // -- txs --
         let carol = Keypair::from_sk(Scalar::from(303u64));
         assert_eq!(
-            fresh(vec![], vec![signed(&hasher, &carol, alice.pk_x(), Asset::Cash, 5, 0, false, 21)]).unwrap_err(),
+            fresh(
+                vec![],
+                vec![signed(
+                    &hasher,
+                    &carol,
+                    alice.pk_x(),
+                    Asset::Cash,
+                    5,
+                    0,
+                    false,
+                    21
+                )]
+            )
+            .unwrap_err(),
             BuildError::SenderNotFound { tx_index: 0 }
         );
         assert_eq!(
-            fresh(vec![], vec![signed(&hasher, &alice, bob.pk_x(), Asset::Cash, 5, 7, false, 22)]).unwrap_err(),
-            BuildError::NonceMismatch { tx_index: 0, expected: 0, got: 7 }
+            fresh(
+                vec![],
+                vec![signed(
+                    &hasher,
+                    &alice,
+                    bob.pk_x(),
+                    Asset::Cash,
+                    5,
+                    7,
+                    false,
+                    22
+                )]
+            )
+            .unwrap_err(),
+            BuildError::NonceMismatch {
+                tx_index: 0,
+                expected: 0,
+                got: 7
+            }
         );
         assert_eq!(
-            fresh(vec![], vec![signed(&hasher, &alice, bob.pk_x(), Asset::Cash, 2_000_000, 0, false, 23)]).unwrap_err(),
-            BuildError::InsufficientBalance { tx_index: 0, balance: 1_000_000, amount: 2_000_000 }
+            fresh(
+                vec![],
+                vec![signed(
+                    &hasher,
+                    &alice,
+                    bob.pk_x(),
+                    Asset::Cash,
+                    2_000_000,
+                    0,
+                    false,
+                    23
+                )]
+            )
+            .unwrap_err(),
+            BuildError::InsufficientBalance {
+                tx_index: 0,
+                balance: 1_000_000,
+                amount: 2_000_000
+            }
         );
         // Per-asset balance: alice has plenty of cash but only 300 coll.
         assert_eq!(
-            fresh(vec![], vec![signed(&hasher, &alice, bob.pk_x(), Asset::Coll, 400, 0, false, 24)]).unwrap_err(),
-            BuildError::InsufficientBalance { tx_index: 0, balance: 300, amount: 400 }
+            fresh(
+                vec![],
+                vec![signed(
+                    &hasher,
+                    &alice,
+                    bob.pk_x(),
+                    Asset::Coll,
+                    400,
+                    0,
+                    false,
+                    24
+                )]
+            )
+            .unwrap_err(),
+            BuildError::InsufficientBalance {
+                tx_index: 0,
+                balance: 300,
+                amount: 400
+            }
         );
         assert_eq!(
-            fresh(vec![], vec![signed(&hasher, &alice, carol.pk_x(), Asset::Cash, 5, 0, false, 25)]).unwrap_err(),
+            fresh(
+                vec![],
+                vec![signed(
+                    &hasher,
+                    &alice,
+                    carol.pk_x(),
+                    Asset::Cash,
+                    5,
+                    0,
+                    false,
+                    25
+                )]
+            )
+            .unwrap_err(),
             BuildError::RecipientNotFound { tx_index: 0 }
         );
         assert_eq!(
-            fresh(vec![], vec![signed(&hasher, &alice, bob.pk_x(), Asset::Cash, 0, 0, false, 26)]).unwrap_err(),
+            fresh(
+                vec![],
+                vec![signed(
+                    &hasher,
+                    &alice,
+                    bob.pk_x(),
+                    Asset::Cash,
+                    0,
+                    0,
+                    false,
+                    26
+                )]
+            )
+            .unwrap_err(),
             BuildError::ZeroAmount
         );
         // Tampered signature (asset flipped after signing must fail too).
         let mut bad = signed(&hasher, &alice, bob.pk_x(), Asset::Cash, 5, 0, false, 27);
         bad.asset = Asset::Coll;
-        assert_eq!(fresh(vec![], vec![bad]).unwrap_err(), BuildError::BadSignature { tx_index: 0 });
+        assert_eq!(
+            fresh(vec![], vec![bad]).unwrap_err(),
+            BuildError::BadSignature { tx_index: 0 }
+        );
         let mut bad = signed(&hasher, &alice, bob.pk_x(), Asset::Cash, 5, 0, false, 28);
         bad.amount = 6;
-        assert_eq!(fresh(vec![], vec![bad]).unwrap_err(), BuildError::BadSignature { tx_index: 0 });
+        assert_eq!(
+            fresh(vec![], vec![bad]).unwrap_err(),
+            BuildError::BadSignature { tx_index: 0 }
+        );
         // Odd-y sender pk fails pk reconstruction.
         let mut odd = signed(&hasher, &alice, bob.pk_x(), Asset::Cash, 5, 0, false, 29);
         odd.from_pk_y = fr_from_u64(3); // not alice's y; also not on curve
-        assert_eq!(fresh(vec![], vec![odd]).unwrap_err(), BuildError::BadSignature { tx_index: 0 });
+        assert_eq!(
+            fresh(vec![], vec![odd]).unwrap_err(),
+            BuildError::BadSignature { tx_index: 0 }
+        );
 
         // -- capacity --
         assert_eq!(
             fresh(
-                (0..5).map(|i| dep(fr_from_u64(1000 + i), Asset::Cash, 1)).collect(),
+                (0..5)
+                    .map(|i| dep(fr_from_u64(1000 + i), Asset::Cash, 1))
+                    .collect(),
                 vec![]
             )
             .unwrap_err(),
@@ -677,11 +922,26 @@ mod tests {
         );
         let mut full = Tree::new();
         for i in 0..crate::tree::N_LEAVES as u32 {
-            full.set(i, Account { pk_x: fr_from_u64(10_000 + i as u64), cash: 1, coll: 0, nonce: 0 });
+            full.set(
+                i,
+                Account {
+                    pk_x: fr_from_u64(10_000 + i as u64),
+                    cash: 1,
+                    coll: 0,
+                    nonce: 0,
+                },
+            );
         }
         assert_eq!(
-            build_batch(&hasher, &mut full, 1, 1, &[dep(alice.pk_x(), Asset::Cash, 1)], &[])
-                .unwrap_err(),
+            build_batch(
+                &hasher,
+                &mut full,
+                1,
+                1,
+                &[dep(alice.pk_x(), Asset::Cash, 1)],
+                &[]
+            )
+            .unwrap_err(),
             BuildError::TreeFull
         );
     }
@@ -702,12 +962,37 @@ mod tests {
                 dep(alice.pk_x(), Asset::Cash, 100),
                 dep(bob.pk_x(), Asset::Coll, 1),
             ],
-            &[signed(&hasher, &alice, bob.pk_x(), Asset::Cash, 100, 0, false, 31)],
+            &[signed(
+                &hasher,
+                &alice,
+                bob.pk_x(),
+                Asset::Cash,
+                100,
+                0,
+                false,
+                31,
+            )],
         )
         .unwrap();
         let mut expect = Tree::new();
-        expect.set(0, Account { pk_x: alice.pk_x(), cash: 0, coll: 0, nonce: 1 });
-        expect.set(1, Account { pk_x: bob.pk_x(), cash: 100, coll: 1, nonce: 0 });
+        expect.set(
+            0,
+            Account {
+                pk_x: alice.pk_x(),
+                cash: 0,
+                coll: 0,
+                nonce: 1,
+            },
+        );
+        expect.set(
+            1,
+            Account {
+                pk_x: bob.pk_x(),
+                cash: 100,
+                coll: 1,
+                nonce: 0,
+            },
+        );
         assert_eq!(w.new_root, expect.root(&hasher));
     }
 }
@@ -732,9 +1017,18 @@ mod prop_tests {
         (2usize..5)
             .prop_flat_map(|n| {
                 (
-                    proptest::collection::vec((1u64..1_000_000_000_000, 1u64..1_000_000_000_000), n),
                     proptest::collection::vec(
-                        ((0usize..n), (0usize..n), (1u8..100), any::<bool>(), any::<bool>()),
+                        (1u64..1_000_000_000_000, 1u64..1_000_000_000_000),
+                        n,
+                    ),
+                    proptest::collection::vec(
+                        (
+                            (0usize..n),
+                            (0usize..n),
+                            (1u8..100),
+                            any::<bool>(),
+                            any::<bool>(),
+                        ),
                         1..4,
                     ),
                 )
@@ -743,7 +1037,9 @@ mod prop_tests {
     }
 
     fn keypairs(n: usize) -> Vec<Keypair> {
-        (0..n).map(|i| Keypair::from_sk(Scalar::from(1_000 + i as u64))).collect()
+        (0..n)
+            .map(|i| Keypair::from_sk(Scalar::from(1_000 + i as u64)))
+            .collect()
     }
 
     proptest! {

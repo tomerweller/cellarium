@@ -8,7 +8,7 @@
 //! harness/src/{batch,l1}.rs; DESIGN.md is the spec.
 
 use soroban_poseidon::poseidon2_hash;
-use soroban_sdk::{crypto::BnScalar, Address, Bytes, BytesN, Env, U256, Vec as SVec};
+use soroban_sdk::{crypto::BnScalar, Address, Bytes, BytesN, Env, Vec as SVec, U256};
 
 pub const DOMAIN_ADDR: u32 = 6;
 pub const DOMAIN_DEP2: u32 = 11;
@@ -16,9 +16,8 @@ pub const DOMAIN_WD2: u32 = 12;
 
 /// BN254 scalar field modulus r, big-endian.
 const BN254_R: [u8; 32] = [
-    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58,
-    0x5d, 0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00,
-    0x00, 0x01,
+    0x30, 0x64, 0x4e, 0x72, 0xe1, 0x31, 0xa0, 0x29, 0xb8, 0x50, 0x45, 0xb6, 0x81, 0x81, 0x58, 0x5d,
+    0x28, 0x33, 0xe8, 0x48, 0x79, 0xb9, 0x70, 0x91, 0x43, 0xe1, 0xf5, 0x93, 0xf0, 0x00, 0x00, 0x01,
 ];
 
 pub fn is_canonical_field(word: &[u8; 32]) -> bool {
@@ -70,7 +69,12 @@ pub fn fold(
         U256::from_u32(env, asset),
         U256::from_u128(env, amount as u128),
     );
-    let out = poseidon3(env, U256::from_u32(env, domain), u256_from_word(env, acc), entry);
+    let out = poseidon3(
+        env,
+        U256::from_u32(env, domain),
+        u256_from_word(env, acc),
+        entry,
+    );
     word_from_u256(env, &out)
 }
 

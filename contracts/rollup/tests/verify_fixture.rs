@@ -18,7 +18,10 @@ fn setup(env: &Env) -> RollupContractClient<'_> {
     let oracle = Address::generate(env);
     let operator = Address::generate(env);
     let genesis = BytesN::from_array(env, &[0u8; 32]);
-    let id = env.register(RollupContract, (token_cash, token_coll, oracle, operator, vk, genesis));
+    let id = env.register(
+        RollupContract,
+        (token_cash, token_coll, oracle, operator, vk, genesis),
+    );
     RollupContractClient::new(env, &id)
 }
 

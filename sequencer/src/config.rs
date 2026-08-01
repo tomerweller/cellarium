@@ -68,12 +68,20 @@ impl Config {
             sequencer_address: std::env::var("SEQUENCER_ADDRESS").ok(),
             db_path: PathBuf::from(var_or("DB_PATH", "sequencer.db")),
             listen_addr: var_or("LISTEN_ADDR", "0.0.0.0:8080"),
-            batch_max_wait_secs: var_or("BATCH_MAX_WAIT_SECS", "30").parse().map_err(|_| "bad BATCH_MAX_WAIT_SECS")?,
-            tick_secs: var_or("TICK_SECS", "5").parse().map_err(|_| "bad TICK_SECS")?,
+            batch_max_wait_secs: var_or("BATCH_MAX_WAIT_SECS", "30")
+                .parse()
+                .map_err(|_| "bad BATCH_MAX_WAIT_SECS")?,
+            tick_secs: var_or("TICK_SECS", "5")
+                .parse()
+                .map_err(|_| "bad TICK_SECS")?,
             trusted_proxy_header: Some(var_or("TRUSTED_PROXY_HEADER", "fly-client-ip"))
                 .filter(|s| !s.is_empty()),
-            cli_timeout_secs: var_or("CLI_TIMEOUT_SECS", "30").parse().map_err(|_| "bad CLI_TIMEOUT_SECS")?,
-            submit_timeout_secs: var_or("SUBMIT_TIMEOUT_SECS", "180").parse().map_err(|_| "bad SUBMIT_TIMEOUT_SECS")?,
+            cli_timeout_secs: var_or("CLI_TIMEOUT_SECS", "30")
+                .parse()
+                .map_err(|_| "bad CLI_TIMEOUT_SECS")?,
+            submit_timeout_secs: var_or("SUBMIT_TIMEOUT_SECS", "180")
+                .parse()
+                .map_err(|_| "bad SUBMIT_TIMEOUT_SECS")?,
             circuit_pkg,
             deposit_slots,
             close_slots,
@@ -81,7 +89,9 @@ impl Config {
             open_slots,
             tx_slots,
             oracle_id: var("ORACLE_ID")?,
-            oracle_admin_secret: std::env::var("ORACLE_ADMIN_SECRET").ok().filter(|s| !s.is_empty()),
+            oracle_admin_secret: std::env::var("ORACLE_ADMIN_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
 }

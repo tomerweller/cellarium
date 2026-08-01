@@ -218,19 +218,33 @@ pub enum Command {
     SubmitTx(WireTx, oneshot::Sender<Result<TxReceipt, ApiError>>),
     SubmitIntent(WireIntent, oneshot::Sender<Result<TxReceipt, ApiError>>),
     /// (intent id, counterparty signature)
-    AcceptIntent(i64, WireAccept, oneshot::Sender<Result<TxReceipt, ApiError>>),
+    AcceptIntent(
+        i64,
+        WireAccept,
+        oneshot::Sender<Result<TxReceipt, ApiError>>,
+    ),
     SubmitClose(WireClose, oneshot::Sender<Result<TxReceipt, ApiError>>),
     /// Intents where this pk is counterparty or initiator. Requires a
     /// signed read-auth proof of key control (issue #1 L12).
-    GetIntents(String, WireAuth, oneshot::Sender<Result<serde_json::Value, ApiError>>),
+    GetIntents(
+        String,
+        WireAuth,
+        oneshot::Sender<Result<serde_json::Value, ApiError>>,
+    ),
     GetPositions(String, oneshot::Sender<Result<Vec<PositionInfo>, ApiError>>),
     GetAccount(String, oneshot::Sender<Result<AccountInfo, ApiError>>),
     GetStatus(oneshot::Sender<StatusInfo>),
-    GetHistory(String, oneshot::Sender<Result<Vec<db::HistoryEntry>, ApiError>>),
+    GetHistory(
+        String,
+        oneshot::Sender<Result<Vec<db::HistoryEntry>, ApiError>>,
+    ),
     GetDa(u64, oneshot::Sender<Result<serde_json::Value, ApiError>>),
     GetBatches(oneshot::Sender<Vec<serde_json::Value>>),
     /// From the watcher: newly observed L1 deposits (asset, seq, pk_x, amount).
-    ObservedDeposits(Vec<(u32, u64, Fr, u64)>, oneshot::Sender<Result<(), ApiError>>),
+    ObservedDeposits(
+        Vec<(u32, u64, Fr, u64)>,
+        oneshot::Sender<Result<(), ApiError>>,
+    ),
     /// From the watcher: current on-chain queue heads per asset. Pending
     /// rows below a head were refunded on-chain (issue #1 M5).
     ObservedQueueHeads([u64; 2], oneshot::Sender<Result<(), ApiError>>),
@@ -263,12 +277,22 @@ pub struct Engine {
     chain_synced: bool,
 }
 
-pub fn spawn(cfg: Config, conn: Connection, state: L2State, chain_synced: bool) -> mpsc::Sender<Command> {
+pub fn spawn(
+    cfg: Config,
+    conn: Connection,
+    state: L2State,
+    chain_synced: bool,
+) -> mpsc::Sender<Command> {
     let (tx, rx) = mpsc::channel::<Command>();
     std::thread::Builder::new()
         .name("engine".into())
         .spawn(move || {
-            let mut engine = Engine { cfg, conn, state, chain_synced };
+            let mut engine = Engine {
+                cfg,
+                conn,
+                state,
+                chain_synced,
+            };
             while let Ok(cmd) = rx.recv() {
                 engine.handle(cmd);
             }
@@ -322,7 +346,12 @@ impl Engine {
             Command::TryBuildBatch(price, reply) => {
                 let _ = reply.send(self.try_build_batch(price));
             }
-            Command::RecordProof { batch_num, proof, public_inputs, reply } => {
+            Command::RecordProof {
+                batch_num,
+                proof,
+                public_inputs,
+                reply,
+            } => {
                 let _ = reply.send(self.record_proof(batch_num, proof, public_inputs));
             }
             Command::MarkSubmitting(batch_num, reply) => {
@@ -368,14 +397,26 @@ impl Engine {
     fn get_account(&self, pk_hex: &str) -> Result<AccountInfo, ApiError> {
         let hasher = Hasher::new();
         let pk_x = parse_fr(pk_hex).map_err(|e| ApiError::BadField(format!("pk_x: {e:?}")))?;
-        let index = self.state.accounts.find(&pk_x).ok_or(ApiError::AccountUnknown)?;
+        let index = self
+            .state
+            .accounts
+            .find(&pk_x)
+            .ok_or(ApiError::AccountUnknown)?;
         let account = self.state.accounts.get(index).unwrap().clone();
         let (siblings, _) = self.state.accounts.path(&hasher, index);
         let pending = db::mempool_pending_for(&self.conn, &pk_x)?;
-        let pending_opens = db::opens_pending_for(&self.conn, &pk_x)?
-            + db::closes_pending_for(&self.conn, &pk_x)?;
-        let pending_out_cash: u64 = pending.iter().filter(|t| t.asset == 0).map(|t| t.amount).sum();
-        let pending_out_coll: u64 = pending.iter().filter(|t| t.asset == 1).map(|t| t.amount).sum();
+        let pending_opens =
+            db::opens_pending_for(&self.conn, &pk_x)? + db::closes_pending_for(&self.conn, &pk_x)?;
+        let pending_out_cash: u64 = pending
+            .iter()
+            .filter(|t| t.asset == 0)
+            .map(|t| t.amount)
+            .sum();
+        let pending_out_coll: u64 = pending
+            .iter()
+            .filter(|t| t.asset == 1)
+            .map(|t| t.amount)
+            .sum();
         Ok(AccountInfo {
             pk_x: fr_hex(&pk_x),
             index,
@@ -403,7 +444,10 @@ impl Engine {
             inflight_batch: db::inflight_batch(&self.conn)
                 .ok()
                 .flatten()
-                .map(|b| InflightInfo { batch_num: b.batch_num, status: b.status }),
+                .map(|b| InflightInfo {
+                    batch_num: b.batch_num,
+                    status: b.status,
+                }),
             chain_synced: self.chain_synced,
         }
     }
@@ -418,8 +462,8 @@ impl Engine {
         if batch.status != "confirmed" {
             return Err(ApiError::NotFound);
         }
-        let mut blob: serde_json::Value =
-            serde_json::from_str(&batch.blob_json).map_err(|e| ApiError::Internal(e.to_string()))?;
+        let mut blob: serde_json::Value = serde_json::from_str(&batch.blob_json)
+            .map_err(|e| ApiError::Internal(e.to_string()))?;
         blob["proof"] = serde_json::Value::String(hex::encode(batch.proof.unwrap_or_default()));
         blob["tx_hash"] = match batch.tx_hash {
             Some(h) => serde_json::Value::String(h),
@@ -460,7 +504,9 @@ impl Engine {
         // HTTP layer; this caps the aggregate.
         const MEMPOOL_MAX_PENDING: u64 = 5_000;
         if db::mempool_count_pending(&self.conn)? >= MEMPOOL_MAX_PENDING {
-            return Err(ApiError::RateLimited("mempool is full; retry shortly".into()));
+            return Err(ApiError::RateLimited(
+                "mempool is full; retry shortly".into(),
+            ));
         }
 
         let from_pk_x = parse_fr(&tx.from_pk_x).map_err(|_| bad("from_pk_x"))?;
@@ -484,18 +530,21 @@ impl Engine {
                 && row.is_withdraw == tx.is_withdraw
                 && same_sig
             {
-                return Ok(TxReceipt { id: row.id, status: row.status });
+                return Ok(TxReceipt {
+                    id: row.id,
+                    status: row.status,
+                });
             }
             return Err(ApiError::DuplicateNonce);
         }
-
 
         let (to_field, withdraw_dest) = if tx.is_withdraw {
             // Full strkey validation (checksum, not just shape): a typo'd
             // destination would exit funds to an unspendable L1 address, and
             // the contract pays whatever address the proof binds (issue #2 M6).
             match stellar_strkey::Strkey::from_string(&tx.to) {
-                Ok(stellar_strkey::Strkey::PublicKeyEd25519(_)) | Ok(stellar_strkey::Strkey::Contract(_)) => {}
+                Ok(stellar_strkey::Strkey::PublicKeyEd25519(_))
+                | Ok(stellar_strkey::Strkey::Contract(_)) => {}
                 _ => return Err(bad("to: expected a valid G… or C… strkey")),
             }
             (address_to_field(&hasher, &tx.to), Some(tx.to.clone()))
@@ -515,14 +564,26 @@ impl Engine {
         let sig_s_hi = parse_fr(&tx.sig.s_hi).map_err(|_| bad("sig.s_hi"))?;
         let sig = Signature::from_limbs(sig_r_x, sig_r_y, sig_s_lo, sig_s_hi)
             .ok_or(ApiError::BadSignature)?;
-        let msg = tx_message(&hasher, from_pk_x, to_field, asset, amount, tx.nonce, tx.is_withdraw);
+        let msg = tx_message(
+            &hasher,
+            from_pk_x,
+            to_field,
+            asset,
+            amount,
+            tx.nonce,
+            tx.is_withdraw,
+        );
         if !verify(&hasher, &pk, msg, &sig) {
             return Err(ApiError::BadSignature);
         }
 
         // Nonce and balance against confirmed state + mempool/opens shadow
         // (each queued open consumes one nonce for each party).
-        let sender_index = self.state.accounts.find(&from_pk_x).ok_or(ApiError::AccountUnknown)?;
+        let sender_index = self
+            .state
+            .accounts
+            .find(&from_pk_x)
+            .ok_or(ApiError::AccountUnknown)?;
         let sender = self.state.accounts.get(sender_index).unwrap().clone();
         let pending = db::mempool_pending_for(&self.conn, &from_pk_x)?;
         let pending_open_count = db::opens_pending_for(&self.conn, &from_pk_x)?;
@@ -530,7 +591,9 @@ impl Engine {
         let expected_nonce =
             sender.nonce + pending.len() as u64 + pending_open_count + pending_close_count;
         if tx.nonce != expected_nonce {
-            return Err(ApiError::NonceMismatch { expected: expected_nonce });
+            return Err(ApiError::NonceMismatch {
+                expected: expected_nonce,
+            });
         }
         let pending_out: u64 = pending
             .iter()
@@ -562,7 +625,10 @@ impl Engine {
             tx.is_withdraw,
             [&sig_r_x, &sig_r_y, &sig_s_lo, &sig_s_hi],
         )?;
-        Ok(TxReceipt { id, status: "pending".into() })
+        Ok(TxReceipt {
+            id,
+            status: "pending".into(),
+        })
     }
 
     fn observed_deposits(&mut self, deps: Vec<(u32, u64, Fr, u64)>) -> Result<(), ApiError> {
@@ -591,7 +657,11 @@ impl Engine {
         // deposits that may already be dequeued (get_pending_deposit traps).
         for asset in 0..2u32 {
             if let Some(seq) = max_seq[asset as usize] {
-                db::meta_set(&self.conn, &format!("dep_cursor_{asset}"), &(seq + 1).to_string())?;
+                db::meta_set(
+                    &self.conn,
+                    &format!("dep_cursor_{asset}"),
+                    &(seq + 1).to_string(),
+                )?;
             }
         }
         Ok(())
@@ -606,7 +676,11 @@ impl Engine {
         for asset in 0..2u32 {
             let n = db::deposits_mark_refunded_below(&self.conn, asset, heads[asset as usize])?;
             if n > 0 {
-                tracing::warn!(asset, count = n, "marked deposits refunded (on-chain queue head advanced past pending rows)");
+                tracing::warn!(
+                    asset,
+                    count = n,
+                    "marked deposits refunded (on-chain queue head advanced past pending rows)"
+                );
             }
         }
         Ok(())
@@ -614,7 +688,10 @@ impl Engine {
 
     // ---------- repo intents (M2) ----------
 
-    fn parse_wire_intent(&self, w: &WireIntent) -> Result<(Position, Fr, Fr, Signature, Fr), ApiError> {
+    fn parse_wire_intent(
+        &self,
+        w: &WireIntent,
+    ) -> Result<(Position, Fr, Fr, Signature, Fr), ApiError> {
         let bad = |field: &str| ApiError::BadField(field.to_string());
         let position = Position {
             borrower_pk_x: parse_fr(&w.borrower_pk_x).map_err(|_| bad("borrower_pk_x"))?,
@@ -721,18 +798,28 @@ impl Engine {
         };
         // Replaying the same signed intent returns the original row.
         if let Some(id) = db::find_open_intent_duplicate(&self.conn, &row)? {
-            return Ok(TxReceipt { id, status: "open".into() });
+            return Ok(TxReceipt {
+                id,
+                status: "open".into(),
+            });
         }
         if db::intents_count_open(&self.conn)? >= INTENTS_MAX_OPEN {
-            return Err(ApiError::RateLimited("intent store is full; retry later".into()));
+            return Err(ApiError::RateLimited(
+                "intent store is full; retry later".into(),
+            ));
         }
         if db::intents_count_open_by_initiator(&self.conn, &fr_hex(&signer_x))?
             >= INTENTS_MAX_PER_INITIATOR
         {
-            return Err(ApiError::RateLimited("too many open intents for this account".into()));
+            return Err(ApiError::RateLimited(
+                "too many open intents for this account".into(),
+            ));
         }
         let id = db::insert_intent(&self.conn, &row)?;
-        Ok(TxReceipt { id, status: "open".into() })
+        Ok(TxReceipt {
+            id,
+            status: "open".into(),
+        })
     }
 
     /// Countersign an intent: verify the acceptor's signature over the SAME
@@ -756,7 +843,12 @@ impl Engine {
         };
         let borrower_pk_y = parse_fr(&intent.borrower_pk_y).map_err(|_| bad("intent"))?;
         let lender_pk_y = parse_fr(&intent.lender_pk_y).map_err(|_| bad("intent"))?;
-        let msg = open_message(&hasher, &position, intent.borrower_nonce, intent.lender_nonce);
+        let msg = open_message(
+            &hasher,
+            &position,
+            intent.borrower_nonce,
+            intent.lender_nonce,
+        );
 
         // The acceptor is whichever role did NOT initiate.
         let (acceptor_x, acceptor_y) = match intent.initiator.as_str() {
@@ -824,7 +916,10 @@ impl Engine {
             },
         )?;
         db::intent_set_status(&self.conn, id, "accepted")?;
-        Ok(TxReceipt { id: open_id, status: "pending".into() })
+        Ok(TxReceipt {
+            id: open_id,
+            status: "pending".into(),
+        })
     }
 
     fn get_intents(&self, pk_hex: &str, auth: &WireAuth) -> Result<serde_json::Value, ApiError> {
@@ -911,7 +1006,11 @@ impl Engine {
             return Err(ApiError::BadSignature);
         }
         // Nonce plausibility against the shadow (exact check happens at build).
-        let idx = self.state.accounts.find(&borrower_pk_x).ok_or(ApiError::AccountUnknown)?;
+        let idx = self
+            .state
+            .accounts
+            .find(&borrower_pk_x)
+            .ok_or(ApiError::AccountUnknown)?;
         let account = self.state.accounts.get(idx).unwrap().clone();
         let pending = db::mempool_pending_for(&self.conn, &borrower_pk_x)?;
         let pending_opens = db::opens_pending_for(&self.conn, &borrower_pk_x)?;
@@ -943,7 +1042,10 @@ impl Engine {
                 sig: [sig.r_x, sig.r_y, lo, hi],
             },
         )?;
-        Ok(TxReceipt { id, status: "pending".into() })
+        Ok(TxReceipt {
+            id,
+            status: "pending".into(),
+        })
     }
 
     // ---------- batch pipeline ----------
@@ -1012,10 +1114,10 @@ impl Engine {
                 if db::insert_liq(&self.conn, slot, false)? {
                     tracing::info!(slot, "maturity watcher: enqueueing default");
                 }
-            } else if harness::settle::margin_breached(&p, price) {
-                if db::insert_liq(&self.conn, slot, true)? {
-                    tracing::info!(slot, price, "margin watcher: enqueueing liquidation");
-                }
+            } else if harness::settle::margin_breached(&p, price)
+                && db::insert_liq(&self.conn, slot, true)?
+            {
+                tracing::info!(slot, price, "margin watcher: enqueueing liquidation");
             }
         }
         Ok(())
@@ -1067,7 +1169,10 @@ impl Engine {
             let closes: Vec<CloseRequest> = close_rows.iter().map(close_row_to_request).collect();
             let liqs: Vec<LiqRequest> = liq_rows
                 .iter()
-                .map(|l| LiqRequest { pos_index: l.pos_index, is_liquidation: l.is_liquidation })
+                .map(|l| LiqRequest {
+                    pos_index: l.pos_index,
+                    is_liquidation: l.is_liquidation,
+                })
                 .collect();
             let opens: Vec<OpenRequest> = open_rows.iter().map(open_row_to_request).collect();
             match build_repo_batch(
@@ -1092,7 +1197,15 @@ impl Engine {
                     let batch_num = self.confirmed_batch_num() + 1;
                     let count_cash = deposits.iter().filter(|d| d.asset == 0).count() as u32;
                     let count_coll = deposits.iter().filter(|d| d.asset == 1).count() as u32;
-                    let blob = blob_json(batch_num, &witness, &deposits, &close_rows, &liq_rows, &open_rows, &txs);
+                    let blob = blob_json(
+                        batch_num,
+                        &witness,
+                        &deposits,
+                        &close_rows,
+                        &liq_rows,
+                        &open_rows,
+                        &txs,
+                    );
                     let envelope = envelope_json(&witness, count_cash, count_coll, &txs);
                     let prover_toml =
                         harness::prover::to_repo_prover_toml(&witness, &self.instance_id());
@@ -1113,7 +1226,10 @@ impl Engine {
                     )?;
                     db::deposits_set_status(
                         &self.conn,
-                        &deposits.iter().map(|d| (d.asset, d.seq)).collect::<Vec<_>>(),
+                        &deposits
+                            .iter()
+                            .map(|d| (d.asset, d.seq))
+                            .collect::<Vec<_>>(),
                         "batching",
                         Some(batch_num),
                     )?;
@@ -1192,7 +1308,11 @@ impl Engine {
                 Err(RepoBuildError::Liq(err)) => {
                     let idx = settle_index(&err);
                     let evicted = liq_rows.remove(idx);
-                    tracing::warn!(slot = evicted.pos_index, ?err, "dropping queued default/liquidation");
+                    tracing::warn!(
+                        slot = evicted.pos_index,
+                        ?err,
+                        "dropping queued default/liquidation"
+                    );
                     db::delete_liq(&self.conn, evicted.pos_index)?;
                     if txs.is_empty()
                         && deposits.is_empty()
@@ -1313,7 +1433,10 @@ impl Engine {
             return Err(ApiError::Internal("bb public_inputs mismatch".into()));
         }
         if proof.len() != 14_592 {
-            return Err(ApiError::Internal(format!("bad proof length {}", proof.len())));
+            return Err(ApiError::Internal(format!(
+                "bad proof length {}",
+                proof.len()
+            )));
         }
         let envelope: serde_json::Value = serde_json::from_str(&batch.envelope_json)
             .map_err(|e| ApiError::Internal(e.to_string()))?;
@@ -1378,7 +1501,14 @@ impl Engine {
         // confirmation retry must replay against the unadvanced tree.
         let tx = self.conn.unchecked_transaction()?;
         for (idx, account) in work_state.accounts.leaves.iter() {
-            db::upsert_leaf(&tx, *idx, &account.pk_x, account.cash, account.coll, account.nonce)?;
+            db::upsert_leaf(
+                &tx,
+                *idx,
+                &account.pk_x,
+                account.cash,
+                account.coll,
+                account.nonce,
+            )?;
         }
         for (slot, req) in open_slots.iter().zip(&opens) {
             let p = &req.position;
@@ -1405,11 +1535,25 @@ impl Engine {
             .as_array()
             .unwrap_or(&vec![])
             .iter()
-            .map(|d| (d["asset"].as_u64().unwrap_or(0) as u32, d["seq"].as_u64().unwrap_or(0)))
+            .map(|d| {
+                (
+                    d["asset"].as_u64().unwrap_or(0) as u32,
+                    d["seq"].as_u64().unwrap_or(0),
+                )
+            })
             .collect();
         db::deposits_set_status(&tx, &dep_keys, "consumed", Some(batch_num))?;
         for d in &deposits {
-            db::insert_history(&tx, &d.pk_x, batch_num, "deposit", None, d.asset as u32, d.amount, None)?;
+            db::insert_history(
+                &tx,
+                &d.pk_x,
+                batch_num,
+                "deposit",
+                None,
+                d.asset as u32,
+                d.amount,
+                None,
+            )?;
         }
         // Closes: mark rows included, drop positions, record history.
         let close_ids: Vec<i64> = blob["closes"]
@@ -1422,8 +1566,26 @@ impl Engine {
         for (creq, centry) in closes.iter().zip(witness.closes.iter()) {
             let p = &centry.position;
             db::delete_position(&tx, creq.pos_index)?;
-            db::insert_history(&tx, &p.borrower_pk_x, batch_num, "repo_close", Some(&fr_hex(&p.lender_pk_x)), 0, p.cash + centry.interest, Some(creq.pos_index as u64))?;
-            db::insert_history(&tx, &p.lender_pk_x, batch_num, "repo_close", Some(&fr_hex(&p.borrower_pk_x)), 0, p.cash + centry.interest, Some(creq.pos_index as u64))?;
+            db::insert_history(
+                &tx,
+                &p.borrower_pk_x,
+                batch_num,
+                "repo_close",
+                Some(&fr_hex(&p.lender_pk_x)),
+                0,
+                p.cash + centry.interest,
+                Some(creq.pos_index as u64),
+            )?;
+            db::insert_history(
+                &tx,
+                &p.lender_pk_x,
+                batch_num,
+                "repo_close",
+                Some(&fr_hex(&p.borrower_pk_x)),
+                0,
+                p.cash + centry.interest,
+                Some(creq.pos_index as u64),
+            )?;
         }
         // Defaults/liquidations: settle rows, drop positions, history.
         for (lreq, lentry) in liqs.iter().zip(witness.liqs.iter()) {
@@ -1434,9 +1596,31 @@ impl Engine {
             // row would block the watcher from ever enqueueing that slot
             // again (bug found by the M4 e2e).
             db::delete_liq(&tx, lreq.pos_index)?;
-            let kind = if lreq.is_liquidation { "repo_liquidation" } else { "repo_default" };
-            db::insert_history(&tx, &p.borrower_pk_x, batch_num, kind, Some(&fr_hex(&p.lender_pk_x)), 1, p.coll, Some(lreq.pos_index as u64))?;
-            db::insert_history(&tx, &p.lender_pk_x, batch_num, kind, Some(&fr_hex(&p.borrower_pk_x)), 1, p.coll, Some(lreq.pos_index as u64))?;
+            let kind = if lreq.is_liquidation {
+                "repo_liquidation"
+            } else {
+                "repo_default"
+            };
+            db::insert_history(
+                &tx,
+                &p.borrower_pk_x,
+                batch_num,
+                kind,
+                Some(&fr_hex(&p.lender_pk_x)),
+                1,
+                p.coll,
+                Some(lreq.pos_index as u64),
+            )?;
+            db::insert_history(
+                &tx,
+                &p.lender_pk_x,
+                batch_num,
+                kind,
+                Some(&fr_hex(&p.borrower_pk_x)),
+                1,
+                p.coll,
+                Some(lreq.pos_index as u64),
+            )?;
         }
         let open_ids: Vec<i64> = blob["opens"]
             .as_array()
@@ -1447,8 +1631,26 @@ impl Engine {
         db::opens_set_status(&tx, &open_ids, "included", Some(batch_num), None)?;
         for (slot, req) in open_slots.iter().zip(&opens) {
             let p = &req.position;
-            db::insert_history(&tx, &p.borrower_pk_x, batch_num, "repo_open", Some(&fr_hex(&p.lender_pk_x)), 0, p.cash, Some(*slot as u64))?;
-            db::insert_history(&tx, &p.lender_pk_x, batch_num, "repo_open", Some(&fr_hex(&p.borrower_pk_x)), 0, p.cash, Some(*slot as u64))?;
+            db::insert_history(
+                &tx,
+                &p.borrower_pk_x,
+                batch_num,
+                "repo_open",
+                Some(&fr_hex(&p.lender_pk_x)),
+                0,
+                p.cash,
+                Some(*slot as u64),
+            )?;
+            db::insert_history(
+                &tx,
+                &p.lender_pk_x,
+                batch_num,
+                "repo_open",
+                Some(&fr_hex(&p.borrower_pk_x)),
+                0,
+                p.cash,
+                Some(*slot as u64),
+            )?;
         }
         let tx_ids: Vec<i64> = blob["txs"]
             .as_array()
@@ -1461,10 +1663,37 @@ impl Engine {
             let dest = blob["txs"][i]["withdraw_dest"].as_str().map(String::from);
             let asset = t.asset as u32;
             if t.is_withdraw {
-                db::insert_history(&tx, &t.from_pk_x, batch_num, "withdraw", dest.as_deref(), asset, t.amount, Some(t.nonce))?;
+                db::insert_history(
+                    &tx,
+                    &t.from_pk_x,
+                    batch_num,
+                    "withdraw",
+                    dest.as_deref(),
+                    asset,
+                    t.amount,
+                    Some(t.nonce),
+                )?;
             } else {
-                db::insert_history(&tx, &t.from_pk_x, batch_num, "transfer_out", Some(&fr_hex(&t.to_field)), asset, t.amount, Some(t.nonce))?;
-                db::insert_history(&tx, &t.to_field, batch_num, "transfer_in", Some(&fr_hex(&t.from_pk_x)), asset, t.amount, None)?;
+                db::insert_history(
+                    &tx,
+                    &t.from_pk_x,
+                    batch_num,
+                    "transfer_out",
+                    Some(&fr_hex(&t.to_field)),
+                    asset,
+                    t.amount,
+                    Some(t.nonce),
+                )?;
+                db::insert_history(
+                    &tx,
+                    &t.to_field,
+                    batch_num,
+                    "transfer_in",
+                    Some(&fr_hex(&t.from_pk_x)),
+                    asset,
+                    t.amount,
+                    None,
+                )?;
             }
         }
         db::batch_set_status(&tx, batch_num, "confirmed")?;
@@ -1511,11 +1740,14 @@ impl Engine {
 
     fn clone_state(&self) -> L2State {
         L2State {
-            accounts: Tree { leaves: self.state.accounts.leaves.clone() },
-            positions: PosTree { slots: self.state.positions.slots.clone() },
+            accounts: Tree {
+                leaves: self.state.accounts.leaves.clone(),
+            },
+            positions: PosTree {
+                slots: self.state.positions.slots.clone(),
+            },
         }
     }
-
 }
 
 /// The published DA blob for one batch (free function: also the seam the
@@ -1529,7 +1761,7 @@ pub(crate) fn blob_json(
     opens: &[db::OpenRow],
     txs: &[db::MempoolRow],
 ) -> String {
-        serde_json::json!({
+    serde_json::json!({
             "v": 2,
             "batch_num": batch_num,
             "old_root": fr_hex(&witness.old_state_root),
@@ -1638,34 +1870,51 @@ fn envelope_json(
 pub fn parse_blob(
     blob: &serde_json::Value,
 ) -> Result<
-    (Vec<DepositRequest>, Vec<CloseRequest>, Vec<LiqRequest>, Vec<OpenRequest>, Vec<SignedTx>),
+    (
+        Vec<DepositRequest>,
+        Vec<CloseRequest>,
+        Vec<LiqRequest>,
+        Vec<OpenRequest>,
+        Vec<SignedTx>,
+    ),
     String,
 > {
     let mut deposits = Vec::new();
     for d in blob["deposits"].as_array().ok_or("bad blob: deposits")? {
-        let asset = harness::tree::Asset::from_u32(
-            d["asset"].as_u64().ok_or("bad asset")? as u32
-        )
-        .ok_or("bad asset")?;
+        let asset = harness::tree::Asset::from_u32(d["asset"].as_u64().ok_or("bad asset")? as u32)
+            .ok_or("bad asset")?;
         deposits.push(DepositRequest {
             pk_x: parse_fr(d["pk_x"].as_str().ok_or("bad pk_x")?).map_err(|e| format!("{e:?}"))?,
             asset,
-            amount: d["amount"].as_str().ok_or("bad amount")?.parse().map_err(|_| "bad amount")?,
+            amount: d["amount"]
+                .as_str()
+                .ok_or("bad amount")?
+                .parse()
+                .map_err(|_| "bad amount")?,
         });
     }
     let mut closes = Vec::new();
     for c in blob["closes"].as_array().unwrap_or(&Vec::new()) {
         let sig_fr = |k: &str| -> Result<Fr, String> {
-            parse_fr(c["sig"][k].as_str().ok_or_else(|| format!("bad close sig.{k}"))?)
-                .map_err(|e| format!("close sig.{k}: {e:?}"))
+            parse_fr(
+                c["sig"][k]
+                    .as_str()
+                    .ok_or_else(|| format!("bad close sig.{k}"))?,
+            )
+            .map_err(|e| format!("close sig.{k}: {e:?}"))
         };
         closes.push(CloseRequest {
             pos_index: c["pos_index"].as_u64().ok_or("bad pos_index")? as u32,
             borrower_pk_y: parse_fr(c["borrower_pk_y"].as_str().ok_or("bad borrower_pk_y")?)
                 .map_err(|e| format!("borrower_pk_y: {e:?}"))?,
             borrower_nonce: c["borrower_nonce"].as_u64().ok_or("bad borrower_nonce")?,
-            sig: Signature::from_limbs(sig_fr("r_x")?, sig_fr("r_y")?, sig_fr("s_lo")?, sig_fr("s_hi")?)
-                .ok_or("bad close sig limbs")?,
+            sig: Signature::from_limbs(
+                sig_fr("r_x")?,
+                sig_fr("r_y")?,
+                sig_fr("s_lo")?,
+                sig_fr("s_hi")?,
+            )
+            .ok_or("bad close sig limbs")?,
         });
     }
     let mut liqs = Vec::new();
@@ -1683,8 +1932,12 @@ pub fn parse_blob(
         };
         let sig = |name: &str| -> Result<Signature, String> {
             let g = |k: &str| -> Result<Fr, String> {
-                parse_fr(o[name][k].as_str().ok_or_else(|| format!("bad {name}.{k}"))?)
-                    .map_err(|e| format!("{name}.{k}: {e:?}"))
+                parse_fr(
+                    o[name][k]
+                        .as_str()
+                        .ok_or_else(|| format!("bad {name}.{k}"))?,
+                )
+                .map_err(|e| format!("{name}.{k}: {e:?}"))
             };
             Signature::from_limbs(g("r_x")?, g("r_y")?, g("s_lo")?, g("s_hi")?)
                 .ok_or_else(|| format!("bad {name} limbs"))
@@ -1693,8 +1946,16 @@ pub fn parse_blob(
             position: Position {
                 borrower_pk_x: fr("borrower_pk_x")?,
                 lender_pk_x: fr("lender_pk_x")?,
-                cash: o["cash"].as_str().ok_or("bad cash")?.parse().map_err(|_| "bad cash")?,
-                coll: o["coll"].as_str().ok_or("bad coll")?.parse().map_err(|_| "bad coll")?,
+                cash: o["cash"]
+                    .as_str()
+                    .ok_or("bad cash")?
+                    .parse()
+                    .map_err(|_| "bad cash")?,
+                coll: o["coll"]
+                    .as_str()
+                    .ok_or("bad coll")?
+                    .parse()
+                    .map_err(|_| "bad coll")?,
                 rate_bps: o["rate_bps"].as_u64().ok_or("bad rate_bps")? as u32,
                 haircut_bps: o["haircut_bps"].as_u64().ok_or("bad haircut_bps")? as u32,
                 open_ts: o["open_ts"].as_u64().ok_or("bad open_ts")?,
@@ -1715,8 +1976,12 @@ pub fn parse_blob(
                 .map_err(|e| format!("{key}: {e:?}"))
         };
         let sig_fr = |key: &str| -> Result<Fr, String> {
-            parse_fr(t["sig"][key].as_str().ok_or_else(|| format!("bad sig.{key}"))?)
-                .map_err(|e| format!("sig.{key}: {e:?}"))
+            parse_fr(
+                t["sig"][key]
+                    .as_str()
+                    .ok_or_else(|| format!("bad sig.{key}"))?,
+            )
+            .map_err(|e| format!("sig.{key}: {e:?}"))
         };
         txs.push(SignedTx {
             from_pk_x: fr("from_pk_x")?,
@@ -1724,11 +1989,20 @@ pub fn parse_blob(
             to_field: fr("to_field")?,
             asset: harness::tree::Asset::from_u32(t["asset"].as_u64().ok_or("bad asset")? as u32)
                 .ok_or("bad asset")?,
-            amount: t["amount"].as_str().ok_or("bad amount")?.parse().map_err(|_| "bad amount")?,
+            amount: t["amount"]
+                .as_str()
+                .ok_or("bad amount")?
+                .parse()
+                .map_err(|_| "bad amount")?,
             nonce: t["nonce"].as_u64().ok_or("bad nonce")?,
             is_withdraw: t["is_withdraw"].as_bool().ok_or("bad is_withdraw")?,
-            sig: Signature::from_limbs(sig_fr("r_x")?, sig_fr("r_y")?, sig_fr("s_lo")?, sig_fr("s_hi")?)
-                .ok_or("bad sig limbs")?,
+            sig: Signature::from_limbs(
+                sig_fr("r_x")?,
+                sig_fr("r_y")?,
+                sig_fr("s_lo")?,
+                sig_fr("s_hi")?,
+            )
+            .ok_or("bad sig limbs")?,
         });
     }
     Ok((deposits, closes, liqs, opens, txs))
@@ -1802,7 +2076,15 @@ pub fn load_and_reconcile(
     let hasher = Hasher::new();
     let mut state = L2State::new();
     for (idx, pk_x, cash, coll, nonce) in db::load_leaves(conn).map_err(|e| e.to_string())? {
-        state.accounts.set(idx, Account { pk_x, cash, coll, nonce });
+        state.accounts.set(
+            idx,
+            Account {
+                pk_x,
+                cash,
+                coll,
+                nonce,
+            },
+        );
     }
     for p in db::load_positions(conn).map_err(|e| e.to_string())? {
         state.positions.set(
@@ -1831,7 +2113,10 @@ pub fn load_and_reconcile(
                 tracing::warn!(batch.batch_num, "recovering: batch landed before crash");
                 // Confirmation happens via the engine after spawn (needs &mut state);
                 // signal by leaving status as-is; batcher resumes it.
-                return Ok(BootState { state, chain_synced: true });
+                return Ok(BootState {
+                    state,
+                    chain_synced: true,
+                });
             }
         }
         return Err(format!(
@@ -1894,7 +2179,10 @@ pub fn load_and_reconcile(
         }
     }
 
-    Ok(BootState { state, chain_synced: true })
+    Ok(BootState {
+        state,
+        chain_synced: true,
+    })
 }
 
 #[cfg(test)]
@@ -1915,10 +2203,26 @@ mod tests {
         let bob = Keypair::from_sk(ark_grumpkin::Fr::from(202u64));
 
         let deposits = vec![
-            DepositRequest { pk_x: alice.pk_x(), asset: Asset::Cash, amount: 1_000_000 },
-            DepositRequest { pk_x: bob.pk_x(), asset: Asset::Coll, amount: 500_000 },
+            DepositRequest {
+                pk_x: alice.pk_x(),
+                asset: Asset::Cash,
+                amount: 1_000_000,
+            },
+            DepositRequest {
+                pk_x: bob.pk_x(),
+                asset: Asset::Coll,
+                amount: 500_000,
+            },
         ];
-        let msg1 = tx_message(&hasher, alice.pk_x(), bob.pk_x(), Asset::Cash, 250_000, 0, false);
+        let msg1 = tx_message(
+            &hasher,
+            alice.pk_x(),
+            bob.pk_x(),
+            Asset::Cash,
+            250_000,
+            0,
+            false,
+        );
         let sig1 = sign_with_nonce(&hasher, &alice, msg1, ark_grumpkin::Fr::from(41u64));
         let wd_field = fr_from_u64(770_007);
         let msg2 = tx_message(&hasher, bob.pk_x(), wd_field, Asset::Coll, 100_000, 0, true);
@@ -1926,18 +2230,38 @@ mod tests {
 
         let signed = vec![
             SignedTx {
-                from_pk_x: alice.pk_x(), from_pk_y: alice.pk_y(), to_field: bob.pk_x(),
-                asset: Asset::Cash, amount: 250_000, nonce: 0, is_withdraw: false, sig: sig1.clone(),
+                from_pk_x: alice.pk_x(),
+                from_pk_y: alice.pk_y(),
+                to_field: bob.pk_x(),
+                asset: Asset::Cash,
+                amount: 250_000,
+                nonce: 0,
+                is_withdraw: false,
+                sig: sig1.clone(),
             },
             SignedTx {
-                from_pk_x: bob.pk_x(), from_pk_y: bob.pk_y(), to_field: wd_field,
-                asset: Asset::Coll, amount: 100_000, nonce: 0, is_withdraw: true, sig: sig2.clone(),
+                from_pk_x: bob.pk_x(),
+                from_pk_y: bob.pk_y(),
+                to_field: wd_field,
+                asset: Asset::Coll,
+                amount: 100_000,
+                nonce: 0,
+                is_withdraw: true,
+                sig: sig2.clone(),
             },
         ];
         let mut state = L2State::new();
         let witness = build_repo_batch(
-            &hasher, &mut state, (2, 1, 1, 1, 4), &deposits, &[], &[], &[], &signed,
-            1_700_000_100, 250_000_000,
+            &hasher,
+            &mut state,
+            (2, 1, 1, 1, 4),
+            &deposits,
+            &[],
+            &[],
+            &[],
+            &signed,
+            1_700_000_100,
+            250_000_000,
         )
         .unwrap();
 
@@ -1945,7 +2269,13 @@ mod tests {
         let dep_rows: Vec<db::DepositRow> = deposits
             .iter()
             .enumerate()
-            .map(|(i, d)| db::DepositRow { asset: d.asset as u32, seq: i as u64, pk_x: d.pk_x, amount: d.amount, status: "batching".into() })
+            .map(|(i, d)| db::DepositRow {
+                asset: d.asset as u32,
+                seq: i as u64,
+                pk_x: d.pk_x,
+                amount: d.amount,
+                status: "batching".into(),
+            })
             .collect();
         let tx_rows: Vec<db::MempoolRow> = signed
             .iter()
@@ -2001,8 +2331,16 @@ mod tests {
         // (deterministic replay — the confirm path's core assumption).
         let mut state2 = L2State::new();
         let replay = build_repo_batch(
-            &hasher, &mut state2, (2, 1, 1, 1, 4), &deps2, &closes2, &liqs2, &opens2, &txs2,
-            1_700_000_100, 250_000_000,
+            &hasher,
+            &mut state2,
+            (2, 1, 1, 1, 4),
+            &deps2,
+            &closes2,
+            &liqs2,
+            &opens2,
+            &txs2,
+            1_700_000_100,
+            250_000_000,
         )
         .unwrap();
         assert_eq!(replay.new_state_root, witness.new_state_root);
@@ -2083,11 +2421,26 @@ mod engine_tests {
     fn fund(e: &mut Engine, idx: u32, who: &Keypair, cash: u64) {
         // Every funded test account also gets some collateral so asset-1
         // admission paths are reachable.
-        e.state.accounts.set(idx, Account { pk_x: who.pk_x(), cash, coll: 1_000, nonce: 0 });
+        e.state.accounts.set(
+            idx,
+            Account {
+                pk_x: who.pk_x(),
+                cash,
+                coll: 1_000,
+                nonce: 0,
+            },
+        );
     }
 
     /// A correctly signed WireTx (transfer: `to` = recipient pk_x hex).
-    fn wire_asset(from: &Keypair, to: &str, asset: u32, amount: u64, nonce: u64, wd: bool) -> WireTx {
+    fn wire_asset(
+        from: &Keypair,
+        to: &str,
+        asset: u32,
+        amount: u64,
+        nonce: u64,
+        wd: bool,
+    ) -> WireTx {
         let hasher = Hasher::new();
         // Malformed withdrawal dests are rejected by submit_tx before the
         // signature is even parsed — sign over a dummy field for those.
@@ -2107,7 +2460,12 @@ mod engine_tests {
             nonce,
             wd,
         );
-        let sig = sign_with_nonce(&hasher, from, msg, ark_grumpkin::Fr::from(7_000 + nonce * 131 + amount));
+        let sig = sign_with_nonce(
+            &hasher,
+            from,
+            msg,
+            ark_grumpkin::Fr::from(7_000 + nonce * 131 + amount),
+        );
         let (lo, hi) = sig.s_limbs();
         WireTx {
             from_pk_x: fr_hex(&from.pk_x()),
@@ -2168,7 +2526,11 @@ mod engine_tests {
         let hasher = Hasher::new();
         let p = test_position(borrower, lender);
         let msg = open_message(&hasher, &p, b_nonce, l_nonce);
-        let signer = if initiator == "borrower" { borrower } else { lender };
+        let signer = if initiator == "borrower" {
+            borrower
+        } else {
+            lender
+        };
         let sig = sign_with_nonce(&hasher, signer, msg, ark_grumpkin::Fr::from(9_999u64));
         WireIntent {
             initiator: initiator.into(),
@@ -2204,7 +2566,10 @@ mod engine_tests {
         // payment-then-open, initiator side: alice cannot sign a new intent
         // while her payment is pending.
         let w = wire_intent("borrower", &alice, &bob, 1, 0);
-        assert!(matches!(e.submit_intent(w), Err(ApiError::QueueConflict(_))));
+        assert!(matches!(
+            e.submit_intent(w),
+            Err(ApiError::QueueConflict(_))
+        ));
 
         // payment-then-open, acceptor side: bob (clean queue) initiates, but
         // the countersign is refused while either party has pending payments.
@@ -2213,7 +2578,9 @@ mod engine_tests {
         let p = test_position(&alice, &bob);
         let msg = open_message(&hasher, &p, 1, 0);
         let acc_sig = sign_with_nonce(&hasher, &alice, msg, ark_grumpkin::Fr::from(8_888u64));
-        let accept = WireAccept { sig: wire_sig(&acc_sig) };
+        let accept = WireAccept {
+            sig: wire_sig(&acc_sig),
+        };
         assert!(matches!(
             e.accept_intent(intent_id, accept),
             Err(ApiError::QueueConflict(_))
@@ -2231,7 +2598,10 @@ mod engine_tests {
             nonce: 1,
             sig: wire_sig(&csig),
         };
-        assert!(matches!(e.submit_close(close), Err(ApiError::QueueConflict(_))));
+        assert!(matches!(
+            e.submit_close(close),
+            Err(ApiError::QueueConflict(_))
+        ));
     }
 
     /// Issue #20: replaying the same signed intent must not grow the store,
@@ -2246,20 +2616,26 @@ mod engine_tests {
         let w = wire_intent("borrower", &alice, &bob, 0, 0);
         let r1 = e.submit_intent(w.clone()).unwrap();
         for _ in 0..10 {
-            assert_eq!(e.submit_intent(w.clone()).unwrap().id, r1.id, "replay created a new row");
+            assert_eq!(
+                e.submit_intent(w.clone()).unwrap().id,
+                r1.id,
+                "replay created a new row"
+            );
         }
         assert_eq!(db::intents_count_open(&e.conn).unwrap(), 1);
 
         // Distinct intents count toward the per-initiator cap.
         for i in 1..25u64 {
-            e.submit_intent(wire_intent("borrower", &alice, &bob, i, i)).unwrap();
+            e.submit_intent(wire_intent("borrower", &alice, &bob, i, i))
+                .unwrap();
         }
         assert!(matches!(
             e.submit_intent(wire_intent("borrower", &alice, &bob, 99, 99)),
             Err(ApiError::RateLimited(_))
         ));
         // The counterparty is unaffected by the initiator's cap.
-        e.submit_intent(wire_intent("lender", &alice, &bob, 50, 50)).unwrap();
+        e.submit_intent(wire_intent("lender", &alice, &bob, 50, 50))
+            .unwrap();
     }
 
     /// Issue #45: a reused nonce is idempotent only for identical content;
@@ -2274,7 +2650,10 @@ mod engine_tests {
 
         let r1 = e.submit_tx(transfer(&alice, &bob, 600_000, 0)).unwrap();
         let r2 = e.submit_tx(transfer(&alice, &bob, 600_000, 0)).unwrap();
-        assert_eq!(r1.id, r2.id, "byte-equivalent resubmission stays idempotent");
+        assert_eq!(
+            r1.id, r2.id,
+            "byte-equivalent resubmission stays idempotent"
+        );
 
         assert!(matches!(
             e.submit_tx(transfer(&alice, &bob, 1_234, 0)),
@@ -2282,7 +2661,13 @@ mod engine_tests {
         ));
         // Different withdraw flag over the same nonce also conflicts.
         assert!(matches!(
-            e.submit_tx(wire(&alice, "GB5JFZJIVTKNBXNIUOZVNUGBOW4IHZRXFDGTBXIZDPXTOAZFSCV3QQSI", 600_000, 0, true)),
+            e.submit_tx(wire(
+                &alice,
+                "GB5JFZJIVTKNBXNIUOZVNUGBOW4IHZRXFDGTBXIZDPXTOAZFSCV3QQSI",
+                600_000,
+                0,
+                true
+            )),
             Err(ApiError::DuplicateNonce)
         ));
     }
@@ -2332,7 +2717,8 @@ mod engine_tests {
         ));
 
         // ...unless a pending deposit will create the recipient.
-        e.observed_deposits(vec![(0, 0, carol.pk_x(), 700_000)]).unwrap();
+        e.observed_deposits(vec![(0, 0, carol.pk_x(), 700_000)])
+            .unwrap();
         assert!(e.submit_tx(transfer(&alice, &carol, 100_000, 1)).is_ok());
 
         // Withdrawal destination must be a 56-char G/C strkey.
@@ -2382,7 +2768,10 @@ mod engine_tests {
 
         // >1 pending payments -> eager build.
         e.submit_tx(transfer(&bob, &alice, 2_000, 0)).unwrap();
-        let job = e.try_build_batch(250_000_000).unwrap().expect("eager build");
+        let job = e
+            .try_build_batch(250_000_000)
+            .unwrap()
+            .expect("eager build");
         assert_eq!(job.batch_num, 1);
 
         // Inflight suppression: nothing builds while batch 1 is open.
@@ -2434,7 +2823,10 @@ mod engine_tests {
         )
         .unwrap();
 
-        let job = e.try_build_batch(250_000_000).unwrap().expect("builds after eviction");
+        let job = e
+            .try_build_batch(250_000_000)
+            .unwrap()
+            .expect("builds after eviction");
         assert_eq!(job.batch_num, 1);
 
         // Bad row rejected with a reason; good row riding in the batch.
@@ -2450,7 +2842,9 @@ mod engine_tests {
         assert!(status.1.unwrap().contains("BadSignature"));
         let good_status: String = e
             .conn
-            .query_row("SELECT status FROM mempool WHERE id = ?1", [good.id], |r| r.get(0))
+            .query_row("SELECT status FROM mempool WHERE id = ?1", [good.id], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(good_status, "batching");
     }
@@ -2478,16 +2872,25 @@ mod engine_tests {
         fund(&mut e, 0, &alice, 1_000_000);
         fund(&mut e, 1, &bob, 500_000);
 
-        e.observed_deposits(vec![(0, 0, carol.pk_x(), 700_000)]).unwrap();
+        e.observed_deposits(vec![(0, 0, carol.pk_x(), 700_000)])
+            .unwrap();
         e.submit_tx(transfer(&alice, &bob, 100_000, 0)).unwrap();
 
         let job = e.try_build_batch(250_000_000).unwrap().expect("build");
-        assert_eq!(db::inflight_batch(&e.conn).unwrap().unwrap().status, "proving");
+        assert_eq!(
+            db::inflight_batch(&e.conn).unwrap().unwrap().status,
+            "proving"
+        );
 
         // Prove (synthetic), submit, land, confirm.
-        let envelope = e.record_proof(job.batch_num, vec![1u8; 14_592], pis_for(&e, 1)).unwrap();
+        let envelope = e
+            .record_proof(job.batch_num, vec![1u8; 14_592], pis_for(&e, 1))
+            .unwrap();
         assert!(envelope.contains("\"proof\""));
-        assert_eq!(db::inflight_batch(&e.conn).unwrap().unwrap().status, "proved");
+        assert_eq!(
+            db::inflight_batch(&e.conn).unwrap().unwrap().status,
+            "proved"
+        );
         e.mark_submitting(job.batch_num).unwrap();
         db::batch_set_submitted(&e.conn, job.batch_num, Some("txhash")).unwrap();
         e.confirm_batch(job.batch_num).unwrap();
@@ -2498,7 +2901,11 @@ mod engine_tests {
         assert_eq!(e.state.accounts.get(0).unwrap().cash, 900_000);
         assert_eq!(e.state.accounts.get(0).unwrap().nonce, 1);
         assert_eq!(e.state.accounts.get(1).unwrap().cash, 600_000);
-        let carol_idx = e.state.accounts.find(&carol.pk_x()).expect("carol created by deposit");
+        let carol_idx = e
+            .state
+            .accounts
+            .find(&carol.pk_x())
+            .expect("carol created by deposit");
         assert_eq!(e.state.accounts.get(carol_idx).unwrap().cash, 700_000);
         // Persisted leaves match the live tree root.
         let boot = load_and_reconcile(&e.conn, &e.state.state_root(&hasher), 1).unwrap();
@@ -2506,7 +2913,9 @@ mod engine_tests {
         // Terminal statuses + history.
         assert!(db::inflight_batch(&e.conn).unwrap().is_none());
         assert_eq!(db::deposits_count_pending(&e.conn).unwrap(), 0);
-        assert!(!db::history_for(&e.conn, &alice.pk_x(), 10).unwrap().is_empty());
+        assert!(!db::history_for(&e.conn, &alice.pk_x(), 10)
+            .unwrap()
+            .is_empty());
         // DA blob is served for the confirmed batch and re-parses.
         let blob = e.get_da(1).unwrap();
         assert!(parse_blob(&blob).is_ok());
@@ -2522,7 +2931,8 @@ mod engine_tests {
         fund(&mut e, 1, &bob, 500_000);
         e.submit_tx(transfer(&alice, &bob, 100_000, 0)).unwrap();
         let job = e.try_build_batch(250_000_000).unwrap().expect("build");
-        e.record_proof(job.batch_num, vec![1u8; 14_592], pis_for(&e, 1)).unwrap();
+        e.record_proof(job.batch_num, vec![1u8; 14_592], pis_for(&e, 1))
+            .unwrap();
         e.mark_submitting(job.batch_num).unwrap();
         db::batch_set_submitted(&e.conn, job.batch_num, Some("txhash")).unwrap();
 
@@ -2530,14 +2940,25 @@ mod engine_tests {
         let root_before = e.state.state_root(&hasher);
 
         // Inject a mid-transaction write failure: the history table vanishes.
-        e.conn.execute_batch("ALTER TABLE history RENAME TO history_bak").unwrap();
+        e.conn
+            .execute_batch("ALTER TABLE history RENAME TO history_bak")
+            .unwrap();
         assert!(e.confirm_batch(job.batch_num).is_err());
-        assert_eq!(e.state.state_root(&hasher), root_before, "memory advanced past a failed commit");
+        assert_eq!(
+            e.state.state_root(&hasher),
+            root_before,
+            "memory advanced past a failed commit"
+        );
         assert_eq!(e.confirmed_batch_num(), 0);
-        assert_eq!(db::inflight_batch(&e.conn).unwrap().unwrap().status, "submitted");
+        assert_eq!(
+            db::inflight_batch(&e.conn).unwrap().unwrap().status,
+            "submitted"
+        );
 
         // Restore and retry: confirmation replays against the unadvanced tree.
-        e.conn.execute_batch("ALTER TABLE history_bak RENAME TO history").unwrap();
+        e.conn
+            .execute_batch("ALTER TABLE history_bak RENAME TO history")
+            .unwrap();
         e.confirm_batch(job.batch_num).unwrap();
         assert_eq!(e.confirmed_batch_num(), 1);
         assert_eq!(e.state.accounts.get(0).unwrap().cash, 900_000);
@@ -2554,15 +2975,23 @@ mod engine_tests {
 
         let good_pis = pis_for(&e, job.batch_num);
         // Wrong PI length (the old 5-PI size must be rejected too).
-        assert!(e.record_proof(job.batch_num, vec![1u8; 14_592], vec![0u8; 160]).is_err());
+        assert!(e
+            .record_proof(job.batch_num, vec![1u8; 14_592], vec![0u8; 160])
+            .is_err());
         // Tampered da_commitment word.
         let mut bad = good_pis.clone();
         bad[159] ^= 1;
-        assert!(e.record_proof(job.batch_num, vec![1u8; 14_592], bad).is_err());
+        assert!(e
+            .record_proof(job.batch_num, vec![1u8; 14_592], bad)
+            .is_err());
         // Wrong proof length.
-        assert!(e.record_proof(job.batch_num, vec![1u8; 14_591], good_pis.clone()).is_err());
+        assert!(e
+            .record_proof(job.batch_num, vec![1u8; 14_591], good_pis.clone())
+            .is_err());
         // Correct shape lands.
-        assert!(e.record_proof(job.batch_num, vec![1u8; 14_592], good_pis).is_ok());
+        assert!(e
+            .record_proof(job.batch_num, vec![1u8; 14_592], good_pis)
+            .is_ok());
     }
 
     /// Regression (bug found by this suite): a corrupt batch row must not
@@ -2575,7 +3004,8 @@ mod engine_tests {
         fund(&mut e, 1, &bob, 500_000);
         e.submit_tx(transfer(&alice, &bob, 1_000, 0)).unwrap();
         let job = e.try_build_batch(250_000_000).unwrap().unwrap();
-        e.record_proof(job.batch_num, vec![1u8; 14_592], pis_for(&e, 1)).unwrap();
+        e.record_proof(job.batch_num, vec![1u8; 14_592], pis_for(&e, 1))
+            .unwrap();
 
         // Corrupt the recorded new_root.
         e.conn
@@ -2588,7 +3018,11 @@ mod engine_tests {
         let hasher = Hasher::new();
         let root_before = e.state.state_root(&hasher);
         assert!(e.confirm_batch(1).is_err());
-        assert_eq!(e.state.state_root(&hasher), root_before, "live state must not move");
+        assert_eq!(
+            e.state.state_root(&hasher),
+            root_before,
+            "live state must not move"
+        );
         assert_eq!(e.confirmed_batch_num(), 0);
     }
 
@@ -2606,10 +3040,17 @@ mod engine_tests {
 
         e.fail_batch(1, "submit_batch returned error").unwrap();
         assert!(db::inflight_batch(&e.conn).unwrap().is_none());
-        assert_eq!(db::mempool_count_pending(&e.conn).unwrap(), 1, "inputs requeued");
+        assert_eq!(
+            db::mempool_count_pending(&e.conn).unwrap(),
+            1,
+            "inputs requeued"
+        );
 
         // The rebuild reuses batch_num 1 and must succeed.
-        let rebuilt = e.try_build_batch(250_000_000).unwrap().expect("rebuild after failure");
+        let rebuilt = e
+            .try_build_batch(250_000_000)
+            .unwrap()
+            .expect("rebuild after failure");
         assert_eq!(rebuilt.batch_num, 1);
     }
 
@@ -2626,7 +3067,12 @@ mod engine_tests {
             borrower_pk_x: fr_from_u64(11),
             borrower_pk_y: fr_from_u64(12),
             borrower_nonce: 0,
-            sig: [fr_from_u64(1), fr_from_u64(2), fr_from_u64(3), fr_from_u64(4)],
+            sig: [
+                fr_from_u64(1),
+                fr_from_u64(2),
+                fr_from_u64(3),
+                fr_from_u64(4),
+            ],
         };
         let close_id = db::insert_close(&e.conn, &close).unwrap();
         assert!(db::insert_liq(&e.conn, 7, false).unwrap());
@@ -2639,7 +3085,11 @@ mod engine_tests {
 
         e.fail_batch(1, "prove failed").unwrap();
 
-        assert_eq!(db::closes_count_pending(&e.conn).unwrap(), 1, "close requeued");
+        assert_eq!(
+            db::closes_count_pending(&e.conn).unwrap(),
+            1,
+            "close requeued"
+        );
         let liqs = db::liqs_pending(&e.conn, 8).unwrap();
         assert_eq!(liqs.len(), 1, "liq requeued");
         assert_eq!(liqs[0].pos_index, 7);
@@ -2653,7 +3103,11 @@ mod engine_tests {
 
         // (a) Fresh DB, chain at genesis -> synced.
         let e = engine(2, 4, 0);
-        assert!(load_and_reconcile(&e.conn, &genesis, 0).unwrap().chain_synced);
+        assert!(
+            load_and_reconcile(&e.conn, &genesis, 0)
+                .unwrap()
+                .chain_synced
+        );
 
         // (b) Crashed after landing: chain ahead by one, inflight matches.
         let mut e = engine(2, 4, 0);
@@ -2701,8 +3155,15 @@ mod engine_tests {
         e.try_build_batch(250_000_000).unwrap().unwrap(); // status 'proving', then "crash"
         let boot = load_and_reconcile(&e.conn, &chain_root, 0).unwrap();
         assert!(boot.chain_synced);
-        assert!(db::inflight_batch(&e.conn).unwrap().is_none(), "interrupted prove cleared");
-        assert_eq!(db::mempool_count_pending(&e.conn).unwrap(), 1, "inputs requeued");
+        assert!(
+            db::inflight_batch(&e.conn).unwrap().is_none(),
+            "interrupted prove cleared"
+        );
+        assert_eq!(
+            db::mempool_count_pending(&e.conn).unwrap(),
+            1,
+            "inputs requeued"
+        );
     }
 
     /// Issue #1 M5: when the on-chain queue head advances past rows that are
@@ -2758,7 +3219,9 @@ mod engine_tests {
         };
 
         // Valid, fresh auth lists (empty) intents.
-        let ok = e.get_intents(&fr_hex(&alice.pk_x()), &auth_for(now)).unwrap();
+        let ok = e
+            .get_intents(&fr_hex(&alice.pk_x()), &auth_for(now))
+            .unwrap();
         assert!(ok["incoming"].as_array().unwrap().is_empty());
 
         // Stale timestamp rejected even with a valid signature over it.

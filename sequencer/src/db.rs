@@ -221,12 +221,17 @@ pub fn meta_set(conn: &Connection, key: &str, value: &str) -> DbResult<()> {
 }
 
 pub fn meta_get_u64(conn: &Connection, key: &str) -> DbResult<u64> {
-    Ok(meta_get(conn, key)?.and_then(|v| v.parse().ok()).unwrap_or(0))
+    Ok(meta_get(conn, key)?
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0))
 }
 
 // ---------- leaves ----------
 
-pub fn load_leaves(conn: &Connection) -> DbResult<Vec<(u32, Fr, u64, u64, u64)>> {
+/// (idx, pk_x, cash, coll, nonce)
+pub type LeafRow = (u32, Fr, u64, u64, u64);
+
+pub fn load_leaves(conn: &Connection) -> DbResult<Vec<LeafRow>> {
     let mut stmt = conn.prepare("SELECT idx, pk_x, cash, coll, nonce FROM leaves")?;
     let rows = stmt.query_map([], |r| {
         let idx: u32 = r.get(0)?;
@@ -250,12 +255,25 @@ pub fn load_leaves(conn: &Connection) -> DbResult<Vec<(u32, Fr, u64, u64, u64)>>
     Ok(out)
 }
 
-pub fn upsert_leaf(conn: &Connection, idx: u32, pk_x: &Fr, cash: u64, coll: u64, nonce: u64) -> DbResult<()> {
+pub fn upsert_leaf(
+    conn: &Connection,
+    idx: u32,
+    pk_x: &Fr,
+    cash: u64,
+    coll: u64,
+    nonce: u64,
+) -> DbResult<()> {
     conn.execute(
         "INSERT INTO leaves(idx, pk_x, cash, coll, nonce) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(idx) DO UPDATE SET pk_x = excluded.pk_x,
            cash = excluded.cash, coll = excluded.coll, nonce = excluded.nonce",
-        params![idx, fr_hex(pk_x), cash.to_string(), coll.to_string(), nonce as i64],
+        params![
+            idx,
+            fr_hex(pk_x),
+            cash.to_string(),
+            coll.to_string(),
+            nonce as i64
+        ],
     )?;
     Ok(())
 }
@@ -306,7 +324,8 @@ fn mempool_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<MempoolRow> {
     })
 }
 
-const MEMPOOL_COLS: &str = "id, from_pk_x, from_pk_y, to_field, withdraw_dest, asset, amount, nonce, \
+const MEMPOOL_COLS: &str =
+    "id, from_pk_x, from_pk_y, to_field, withdraw_dest, asset, amount, nonce, \
                             is_withdraw, sig_r_x, sig_r_y, sig_s_lo, sig_s_hi, status, received_at";
 
 #[allow(clippy::too_many_arguments)]
@@ -352,7 +371,7 @@ pub fn mempool_find(conn: &Connection, from_pk_x: &Fr, nonce: u64) -> DbResult<O
     conn.query_row(
         &format!("SELECT {MEMPOOL_COLS} FROM mempool WHERE from_pk_x = ?1 AND nonce = ?2"),
         params![fr_hex(from_pk_x), nonce as i64],
-        |r| mempool_row(r),
+        mempool_row,
     )
     .optional()
 }
@@ -363,7 +382,7 @@ pub fn mempool_pending(conn: &Connection, limit: usize) -> DbResult<Vec<MempoolR
     let mut stmt = conn.prepare(&format!(
         "SELECT {MEMPOOL_COLS} FROM mempool WHERE status = 'pending' ORDER BY id LIMIT ?1"
     ))?;
-    let rows = stmt.query_map([limit as i64], |r| mempool_row(r))?;
+    let rows = stmt.query_map([limit as i64], mempool_row)?;
     rows.collect()
 }
 
@@ -372,7 +391,7 @@ pub fn mempool_pending_for(conn: &Connection, from_pk_x: &Fr) -> DbResult<Vec<Me
         "SELECT {MEMPOOL_COLS} FROM mempool
          WHERE from_pk_x = ?1 AND status IN ('pending','batching') ORDER BY nonce"
     ))?;
-    let rows = stmt.query_map([fr_hex(from_pk_x)], |r| mempool_row(r))?;
+    let rows = stmt.query_map([fr_hex(from_pk_x)], mempool_row)?;
     rows.collect()
 }
 
@@ -393,7 +412,13 @@ pub fn mempool_oldest_pending_age(conn: &Connection) -> DbResult<Option<i64>> {
     .map(|min| min.map(|m| now() - m))
 }
 
-pub fn mempool_set_status(conn: &Connection, ids: &[i64], status: &str, batch_num: Option<u64>, reason: Option<&str>) -> DbResult<()> {
+pub fn mempool_set_status(
+    conn: &Connection,
+    ids: &[i64],
+    status: &str,
+    batch_num: Option<u64>,
+    reason: Option<&str>,
+) -> DbResult<()> {
     for id in ids {
         conn.execute(
             "UPDATE mempool SET status = ?1, batch_num = ?2, reject_reason = ?3 WHERE id = ?4",
@@ -415,7 +440,13 @@ pub struct DepositRow {
     pub status: String,
 }
 
-pub fn insert_deposit(conn: &Connection, asset: u32, seq: u64, pk_x: &Fr, amount: u64) -> DbResult<bool> {
+pub fn insert_deposit(
+    conn: &Connection,
+    asset: u32,
+    seq: u64,
+    pk_x: &Fr,
+    amount: u64,
+) -> DbResult<bool> {
     let n = conn.execute(
         "INSERT OR IGNORE INTO deposits(asset, seq, pk_x, amount, observed_at) VALUES (?1,?2,?3,?4,?5)",
         params![asset as i64, seq as i64, fr_hex(pk_x), amount.to_string(), now()],
@@ -446,9 +477,11 @@ pub fn deposits_pending(conn: &Connection, limit: usize) -> DbResult<Vec<Deposit
 }
 
 pub fn deposits_count_pending(conn: &Connection) -> DbResult<u64> {
-    conn.query_row("SELECT COUNT(*) FROM deposits WHERE status = 'pending'", [], |r| {
-        r.get::<_, i64>(0).map(|v| v as u64)
-    })
+    conn.query_row(
+        "SELECT COUNT(*) FROM deposits WHERE status = 'pending'",
+        [],
+        |r| r.get::<_, i64>(0).map(|v| v as u64),
+    )
 }
 
 pub fn deposits_pending_pk(conn: &Connection, pk_x: &Fr) -> DbResult<bool> {
@@ -481,11 +514,21 @@ pub fn deposits_mark_refunded_below(conn: &Connection, asset: u32, head: u64) ->
     )
 }
 
-pub fn deposits_set_status(conn: &Connection, keys: &[(u32, u64)], status: &str, batch_num: Option<u64>) -> DbResult<()> {
+pub fn deposits_set_status(
+    conn: &Connection,
+    keys: &[(u32, u64)],
+    status: &str,
+    batch_num: Option<u64>,
+) -> DbResult<()> {
     for (asset, seq) in keys {
         conn.execute(
             "UPDATE deposits SET status = ?1, batch_num = ?2 WHERE asset = ?3 AND seq = ?4",
-            params![status, batch_num.map(|b| b as i64), *asset as i64, *seq as i64],
+            params![
+                status,
+                batch_num.map(|b| b as i64),
+                *asset as i64,
+                *seq as i64
+            ],
         )?;
     }
     Ok(())
@@ -541,7 +584,6 @@ const BATCH_COLS: &str = "batch_num, old_root, new_root, deposit_count_cash, dep
                           envelope_json, proof, status, tx_hash, created_at, confirmed_at";
 
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 pub fn insert_batch(
     conn: &Connection,
     batch_num: u64,
@@ -585,7 +627,10 @@ pub fn insert_batch(
 /// the rebuild — a lingering 'failed' row would make the next insert_batch
 /// hit the UNIQUE constraint and wedge batching permanently.
 pub fn delete_batch(conn: &Connection, batch_num: u64) -> DbResult<()> {
-    conn.execute("DELETE FROM batches WHERE batch_num = ?1", [batch_num as i64])?;
+    conn.execute(
+        "DELETE FROM batches WHERE batch_num = ?1",
+        [batch_num as i64],
+    )?;
     Ok(())
 }
 
@@ -593,7 +638,7 @@ pub fn get_batch(conn: &Connection, batch_num: u64) -> DbResult<Option<BatchRow>
     conn.query_row(
         &format!("SELECT {BATCH_COLS} FROM batches WHERE batch_num = ?1"),
         [batch_num as i64],
-        |r| batch_row(r),
+        batch_row,
     )
     .optional()
 }
@@ -606,7 +651,7 @@ pub fn inflight_batch(conn: &Connection) -> DbResult<Option<BatchRow>> {
              ORDER BY batch_num DESC LIMIT 1"
         ),
         [],
-        |r| batch_row(r),
+        batch_row,
     )
     .optional()
 }
@@ -619,7 +664,12 @@ pub fn batch_set_status(conn: &Connection, batch_num: u64, status: &str) -> DbRe
     Ok(())
 }
 
-pub fn batch_set_proof(conn: &Connection, batch_num: u64, proof: &[u8], envelope_json: &str) -> DbResult<()> {
+pub fn batch_set_proof(
+    conn: &Connection,
+    batch_num: u64,
+    proof: &[u8],
+    envelope_json: &str,
+) -> DbResult<()> {
     conn.execute(
         "UPDATE batches SET proof = ?1, envelope_json = ?2, status = 'proved' WHERE batch_num = ?3",
         params![proof, envelope_json, batch_num as i64],
@@ -627,7 +677,11 @@ pub fn batch_set_proof(conn: &Connection, batch_num: u64, proof: &[u8], envelope
     Ok(())
 }
 
-pub fn batch_set_submitted(conn: &Connection, batch_num: u64, tx_hash: Option<&str>) -> DbResult<()> {
+pub fn batch_set_submitted(
+    conn: &Connection,
+    batch_num: u64,
+    tx_hash: Option<&str>,
+) -> DbResult<()> {
     conn.execute(
         "UPDATE batches SET status = 'submitted', tx_hash = ?1 WHERE batch_num = ?2",
         params![tx_hash, batch_num as i64],
@@ -639,7 +693,7 @@ pub fn batch_list(conn: &Connection, limit: usize) -> DbResult<Vec<BatchRow>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT {BATCH_COLS} FROM batches ORDER BY batch_num DESC LIMIT ?1"
     ))?;
-    let rows = stmt.query_map([limit as i64], |r| batch_row(r))?;
+    let rows = stmt.query_map([limit as i64], batch_row)?;
     rows.collect()
 }
 
@@ -722,12 +776,24 @@ pub fn history_for(conn: &Connection, pk_x: &Fr, limit: usize) -> DbResult<Vec<H
         Ok(HistoryEntry {
             id: r.get(0)?,
             batch_num: None,
-            kind: if is_withdraw { "withdraw".into() } else { "transfer_out".into() },
-            counterparty: if is_withdraw { withdraw_dest } else { Some(to_field) },
+            kind: if is_withdraw {
+                "withdraw".into()
+            } else {
+                "transfer_out".into()
+            },
+            counterparty: if is_withdraw {
+                withdraw_dest
+            } else {
+                Some(to_field)
+            },
             asset: r.get::<_, i64>(3)? as u32,
             amount: r.get(4)?,
             nonce: Some(r.get::<_, i64>(5)? as u64),
-            status: if status == "batching" { "pending".into() } else { status },
+            status: if status == "batching" {
+                "pending".into()
+            } else {
+                status
+            },
             ts: r.get(9)?,
         })
     })?;
@@ -771,11 +837,24 @@ pub fn insert_intent(conn: &Connection, r: &IntentRow) -> DbResult<i64> {
                              created_at)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
         params![
-            r.initiator, r.borrower_pk_x, r.borrower_pk_y, r.lender_pk_x, r.lender_pk_y,
-            r.cash, r.coll, r.rate_bps as i64, r.haircut_bps as i64,
-            r.open_ts as i64, r.maturity_ts as i64,
-            r.borrower_nonce as i64, r.lender_nonce as i64,
-            r.sig[0], r.sig[1], r.sig[2], r.sig[3], now(),
+            r.initiator,
+            r.borrower_pk_x,
+            r.borrower_pk_y,
+            r.lender_pk_x,
+            r.lender_pk_y,
+            r.cash,
+            r.coll,
+            r.rate_bps as i64,
+            r.haircut_bps as i64,
+            r.open_ts as i64,
+            r.maturity_ts as i64,
+            r.borrower_nonce as i64,
+            r.lender_nonce as i64,
+            r.sig[0],
+            r.sig[1],
+            r.sig[2],
+            r.sig[3],
+            now(),
         ],
     )?;
     Ok(conn.last_insert_rowid())
@@ -843,7 +922,10 @@ pub fn intents_by_initiator(conn: &Connection, pk_x: &str) -> DbResult<Vec<Inten
 }
 
 pub fn intent_set_status(conn: &Connection, id: i64, status: &str) -> DbResult<()> {
-    conn.execute("UPDATE intents SET status = ?1 WHERE id = ?2", params![status, id])?;
+    conn.execute(
+        "UPDATE intents SET status = ?1 WHERE id = ?2",
+        params![status, id],
+    )?;
     Ok(())
 }
 
@@ -875,9 +957,11 @@ pub fn find_open_intent_duplicate(conn: &Connection, r: &IntentRow) -> DbResult<
 }
 
 pub fn intents_count_open(conn: &Connection) -> DbResult<u64> {
-    conn.query_row("SELECT COUNT(*) FROM intents WHERE status = 'open'", [], |r| {
-        r.get::<_, i64>(0).map(|n| n as u64)
-    })
+    conn.query_row(
+        "SELECT COUNT(*) FROM intents WHERE status = 'open'",
+        [],
+        |r| r.get::<_, i64>(0).map(|n| n as u64),
+    )
 }
 
 pub fn intents_count_open_by_initiator(conn: &Connection, pk_x: &str) -> DbResult<u64> {
@@ -922,11 +1006,7 @@ pub struct OpenRow {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn insert_open(
-    conn: &Connection,
-    intent_id: Option<i64>,
-    row: &OpenRow,
-) -> DbResult<i64> {
+pub fn insert_open(conn: &Connection, intent_id: Option<i64>, row: &OpenRow) -> DbResult<i64> {
     conn.execute(
         "INSERT INTO opens(intent_id, borrower_pk_x, borrower_pk_y, lender_pk_x, lender_pk_y,
                            cash, coll, rate_bps, haircut_bps, open_ts, maturity_ts,
@@ -936,14 +1016,26 @@ pub fn insert_open(
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22)",
         params![
             intent_id,
-            fr_hex(&row.borrower_pk_x), fr_hex(&row.borrower_pk_y),
-            fr_hex(&row.lender_pk_x), fr_hex(&row.lender_pk_y),
-            row.cash.to_string(), row.coll.to_string(),
-            row.rate_bps as i64, row.haircut_bps as i64,
-            row.open_ts as i64, row.maturity_ts as i64,
-            row.borrower_nonce as i64, row.lender_nonce as i64,
-            fr_hex(&row.b_sig[0]), fr_hex(&row.b_sig[1]), fr_hex(&row.b_sig[2]), fr_hex(&row.b_sig[3]),
-            fr_hex(&row.l_sig[0]), fr_hex(&row.l_sig[1]), fr_hex(&row.l_sig[2]), fr_hex(&row.l_sig[3]),
+            fr_hex(&row.borrower_pk_x),
+            fr_hex(&row.borrower_pk_y),
+            fr_hex(&row.lender_pk_x),
+            fr_hex(&row.lender_pk_y),
+            row.cash.to_string(),
+            row.coll.to_string(),
+            row.rate_bps as i64,
+            row.haircut_bps as i64,
+            row.open_ts as i64,
+            row.maturity_ts as i64,
+            row.borrower_nonce as i64,
+            row.lender_nonce as i64,
+            fr_hex(&row.b_sig[0]),
+            fr_hex(&row.b_sig[1]),
+            fr_hex(&row.b_sig[2]),
+            fr_hex(&row.b_sig[3]),
+            fr_hex(&row.l_sig[0]),
+            fr_hex(&row.l_sig[1]),
+            fr_hex(&row.l_sig[2]),
+            fr_hex(&row.l_sig[3]),
             now(),
         ],
     )?;
@@ -999,9 +1091,11 @@ pub fn opens_pending_for(conn: &Connection, pk_x: &Fr) -> DbResult<u64> {
 }
 
 pub fn opens_count_pending(conn: &Connection) -> DbResult<u64> {
-    conn.query_row("SELECT COUNT(*) FROM opens WHERE status = 'pending'", [], |r| {
-        r.get::<_, i64>(0).map(|v| v as u64)
-    })
+    conn.query_row(
+        "SELECT COUNT(*) FROM opens WHERE status = 'pending'",
+        [],
+        |r| r.get::<_, i64>(0).map(|v| v as u64),
+    )
 }
 
 pub fn opens_oldest_pending_age(conn: &Connection) -> DbResult<Option<i64>> {
@@ -1118,7 +1212,10 @@ pub fn insert_close(conn: &Connection, row: &CloseRow) -> DbResult<i64> {
             fr_hex(&row.borrower_pk_x),
             fr_hex(&row.borrower_pk_y),
             row.borrower_nonce as i64,
-            fr_hex(&row.sig[0]), fr_hex(&row.sig[1]), fr_hex(&row.sig[2]), fr_hex(&row.sig[3]),
+            fr_hex(&row.sig[0]),
+            fr_hex(&row.sig[1]),
+            fr_hex(&row.sig[2]),
+            fr_hex(&row.sig[3]),
             now(),
         ],
     )?;
@@ -1157,15 +1254,19 @@ pub fn closes_pending_for(conn: &Connection, pk_x: &Fr) -> DbResult<u64> {
 }
 
 pub fn closes_count_pending(conn: &Connection) -> DbResult<u64> {
-    conn.query_row("SELECT COUNT(*) FROM closes WHERE status = 'pending'", [], |r| {
-        r.get::<_, i64>(0).map(|v| v as u64)
-    })
+    conn.query_row(
+        "SELECT COUNT(*) FROM closes WHERE status = 'pending'",
+        [],
+        |r| r.get::<_, i64>(0).map(|v| v as u64),
+    )
 }
 
 pub fn closes_oldest_pending_age(conn: &Connection) -> DbResult<Option<i64>> {
-    conn.query_row("SELECT MIN(received_at) FROM closes WHERE status = 'pending'", [], |r| {
-        r.get::<_, Option<i64>>(0)
-    })
+    conn.query_row(
+        "SELECT MIN(received_at) FROM closes WHERE status = 'pending'",
+        [],
+        |r| r.get::<_, Option<i64>>(0),
+    )
     .map(|min| min.map(|m| now() - m))
 }
 
@@ -1214,9 +1315,11 @@ pub fn liqs_pending(conn: &Connection, limit: usize) -> DbResult<Vec<LiqRow>> {
 }
 
 pub fn liqs_count_pending(conn: &Connection) -> DbResult<u64> {
-    conn.query_row("SELECT COUNT(*) FROM liqs WHERE status = 'pending'", [], |r| {
-        r.get::<_, i64>(0).map(|v| v as u64)
-    })
+    conn.query_row(
+        "SELECT COUNT(*) FROM liqs WHERE status = 'pending'",
+        [],
+        |r| r.get::<_, i64>(0).map(|v| v as u64),
+    )
 }
 
 pub fn liqs_set_status(

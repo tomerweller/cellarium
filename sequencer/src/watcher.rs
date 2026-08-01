@@ -109,7 +109,10 @@ pub async fn run(
 /// Report observed deposits to the engine, awaiting its ack.
 async fn report(engine: &mpsc::Sender<Command>, deposits: Vec<(u32, u64, Fr, u64)>) -> bool {
     let (tx, rx) = oneshot::channel();
-    if engine.send(Command::ObservedDeposits(deposits, tx)).is_err() {
+    if engine
+        .send(Command::ObservedDeposits(deposits, tx))
+        .is_err()
+    {
         return false;
     }
     matches!(rx.await, Ok(Ok(())))

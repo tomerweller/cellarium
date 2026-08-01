@@ -72,11 +72,16 @@ pub struct BurnEvent {
 }
 
 fn read_balance(env: &Env, addr: &Address) -> i128 {
-    env.storage().persistent().get(&DataKey::Balance(addr.clone())).unwrap_or(0)
+    env.storage()
+        .persistent()
+        .get(&DataKey::Balance(addr.clone()))
+        .unwrap_or(0)
 }
 
 fn write_balance(env: &Env, addr: &Address, amount: i128) {
-    env.storage().persistent().set(&DataKey::Balance(addr.clone()), &amount);
+    env.storage()
+        .persistent()
+        .set(&DataKey::Balance(addr.clone()), &amount);
 }
 
 fn spend_balance(env: &Env, addr: &Address, amount: i128) -> Result<(), TokenError> {
@@ -120,7 +125,10 @@ fn spend_allowance(
     }
     env.storage().temporary().set(
         &key,
-        &AllowanceValue { amount: allowance.amount - amount, ..allowance },
+        &AllowanceValue {
+            amount: allowance.amount - amount,
+            ..allowance
+        },
     );
     Ok(())
 }
@@ -140,19 +148,28 @@ impl TustToken {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
         check_positive(amount)?;
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
+        let supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0);
         let new_supply = supply + amount;
         if new_supply > SUPPLY_CAP {
             return Err(TokenError::SupplyCapExceeded);
         }
-        env.storage().instance().set(&DataKey::TotalSupply, &new_supply);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &new_supply);
         receive_balance(&env, &to, amount);
         MintEvent { to, amount }.publish(&env);
         Ok(())
     }
 
     pub fn total_supply(env: Env) -> i128 {
-        env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0)
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0)
     }
 
     pub fn admin(env: Env) -> Address {
@@ -163,8 +180,10 @@ impl TustToken {
 #[contractimpl]
 impl TokenInterface for TustToken {
     fn allowance(env: Env, from: Address, spender: Address) -> i128 {
-        let allowance: Option<AllowanceValue> =
-            env.storage().temporary().get(&DataKey::Allowance(from, spender));
+        let allowance: Option<AllowanceValue> = env
+            .storage()
+            .temporary()
+            .get(&DataKey::Allowance(from, spender));
         match allowance {
             Some(a) if a.expiration_ledger >= env.ledger().sequence() => a.amount,
             _ => 0,
@@ -180,9 +199,13 @@ impl TokenInterface for TustToken {
                 expiration_ledger >= env.ledger().sequence(),
                 "expiration_ledger in the past"
             );
-            env.storage()
-                .temporary()
-                .set(&key, &AllowanceValue { amount, expiration_ledger });
+            env.storage().temporary().set(
+                &key,
+                &AllowanceValue {
+                    amount,
+                    expiration_ledger,
+                },
+            );
         } else {
             env.storage().temporary().remove(&key);
         }
@@ -214,8 +237,14 @@ impl TokenInterface for TustToken {
         from.require_auth();
         check_positive(amount).unwrap();
         spend_balance(&env, &from, amount).unwrap();
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
+        let supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &(supply - amount));
         BurnEvent { from, amount }.publish(&env);
     }
 
@@ -224,8 +253,14 @@ impl TokenInterface for TustToken {
         check_positive(amount).unwrap();
         spend_allowance(&env, &from, &spender, amount).unwrap();
         spend_balance(&env, &from, amount).unwrap();
-        let supply: i128 = env.storage().instance().get(&DataKey::TotalSupply).unwrap_or(0);
-        env.storage().instance().set(&DataKey::TotalSupply, &(supply - amount));
+        let supply: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalSupply)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalSupply, &(supply - amount));
         BurnEvent { from, amount }.publish(&env);
     }
 
@@ -253,10 +288,17 @@ mod test {
         env.mock_all_auths();
         let admin = Address::generate(&env);
         let id = env.register(TustToken, (&admin,));
-        (env.clone(), admin, TustTokenClient::new(&env, &id), TokenClient::new(&env, &id))
+        (
+            env.clone(),
+            admin,
+            TustTokenClient::new(&env, &id),
+            TokenClient::new(&env, &id),
+        )
     }
 
     #[test]
+    // Amounts are written as <tokens>_<7-decimal stroops> on purpose.
+    #[allow(clippy::inconsistent_digit_grouping)]
     fn mint_transfer_burn_roundtrip() {
         let (env, _admin, tust, token) = setup();
         let alice = Address::generate(&env);
@@ -306,7 +348,9 @@ mod test {
         assert_eq!(token.allowance(&alice, &spender), 10);
 
         // Exceeding the remaining allowance traps.
-        assert!(token.try_transfer_from(&spender, &alice, &bob, &11i128).is_err());
+        assert!(token
+            .try_transfer_from(&spender, &alice, &bob, &11i128)
+            .is_err());
     }
 
     #[test]

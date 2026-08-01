@@ -33,7 +33,16 @@ fn keypair(sk: u64) -> Keypair {
 fn post_json(path: &str, body: &serde_json::Value) -> String {
     let url = format!("{}{}", seq_url(), path);
     let out = std::process::Command::new("curl")
-        .args(["-sS", "-X", "POST", &url, "-H", "Content-Type: application/json", "-d", &body.to_string()])
+        .args([
+            "-sS",
+            "-X",
+            "POST",
+            &url,
+            "-H",
+            "Content-Type: application/json",
+            "-d",
+            &body.to_string(),
+        ])
         .output()
         .expect("curl");
     let s = String::from_utf8_lossy(&out.stdout).to_string();
@@ -47,7 +56,10 @@ fn post_tx(body: &serde_json::Value) {
 
 fn get_json(path: &str) -> serde_json::Value {
     let url = format!("{}{}", seq_url(), path);
-    let out = std::process::Command::new("curl").args(["-sS", &url]).output().expect("curl");
+    let out = std::process::Command::new("curl")
+        .args(["-sS", &url])
+        .output()
+        .expect("curl");
     serde_json::from_slice(&out.stdout).expect("json")
 }
 
@@ -85,7 +97,8 @@ fn main() {
             let amount = &args[4];
             let contract = std::env::var("CONTRACT_ID").expect("CONTRACT_ID");
             let key = std::env::var("SEQ_KEY").expect("SEQ_KEY");
-            let rpc = std::env::var("RPC_URL").unwrap_or_else(|_| "https://soroban-testnet.stellar.org".into());
+            let rpc = std::env::var("RPC_URL")
+                .unwrap_or_else(|_| "https://soroban-testnet.stellar.org".into());
             let pass = std::env::var("NETWORK_PASSPHRASE")
                 .unwrap_or_else(|_| "Test SDF Network ; September 2015".into());
             // `from` is the sequencer's own Stellar account (the funder).
@@ -93,10 +106,26 @@ fn main() {
             let l2_pk_x_bare = l2_pk_x.trim_start_matches("0x");
             let status = std::process::Command::new("stellar")
                 .args([
-                    "contract", "invoke", "--id", &contract, "--rpc-url", &rpc,
-                    "--network-passphrase", &pass, "--source-account", &key, "--",
-                    "deposit", "--from", &addr, "--l2_pk_x", l2_pk_x_bare, "--asset", asset,
-                    "--amount", amount,
+                    "contract",
+                    "invoke",
+                    "--id",
+                    &contract,
+                    "--rpc-url",
+                    &rpc,
+                    "--network-passphrase",
+                    &pass,
+                    "--source-account",
+                    &key,
+                    "--",
+                    "deposit",
+                    "--from",
+                    &addr,
+                    "--l2_pk_x",
+                    l2_pk_x_bare,
+                    "--asset",
+                    asset,
+                    "--amount",
+                    amount,
                 ])
                 .status()
                 .expect("stellar invoke");
@@ -177,22 +206,25 @@ fn main() {
             let lender_nonce = pending_nonce(&to_hex(&lender.pk_x()));
             let msg = open_message(&hasher, &position, borrower_nonce, lender_nonce);
             let sig = sign(&hasher, &initiator, msg, &mut rand::thread_rng());
-            post_json("/intent", &serde_json::json!({
-                "initiator": role,
-                "borrower_pk_x": to_hex(&borrower.pk_x()),
-                "borrower_pk_y": to_hex(&borrower.pk_y()),
-                "lender_pk_x": to_hex(&lender.pk_x()),
-                "lender_pk_y": to_hex(&lender.pk_y()),
-                "cash": cash.to_string(),
-                "coll": coll.to_string(),
-                "rate_bps": rate_bps,
-                "haircut_bps": haircut_bps,
-                "open_ts": now,
-                "maturity_ts": now + term_secs,
-                "borrower_nonce": borrower_nonce,
-                "lender_nonce": lender_nonce,
-                "sig": sig_json(&sig),
-            }));
+            post_json(
+                "/intent",
+                &serde_json::json!({
+                    "initiator": role,
+                    "borrower_pk_x": to_hex(&borrower.pk_x()),
+                    "borrower_pk_y": to_hex(&borrower.pk_y()),
+                    "lender_pk_x": to_hex(&lender.pk_x()),
+                    "lender_pk_y": to_hex(&lender.pk_y()),
+                    "cash": cash.to_string(),
+                    "coll": coll.to_string(),
+                    "rate_bps": rate_bps,
+                    "haircut_bps": haircut_bps,
+                    "open_ts": now,
+                    "maturity_ts": now + term_secs,
+                    "borrower_nonce": borrower_nonce,
+                    "lender_nonce": lender_nonce,
+                    "sig": sig_json(&sig),
+                }),
+            );
         }
         "accept" => {
             use harness::repo::{open_message, Position};
@@ -235,7 +267,10 @@ fn main() {
             let listing = get_json(&format!("/positions/{}", to_hex(&borrower.pk_x())));
             let pos = listing["positions"]
                 .as_array()
-                .and_then(|a| a.iter().find(|p| p["slot"].as_u64() == Some(pos_index as u64)))
+                .and_then(|a| {
+                    a.iter()
+                        .find(|p| p["slot"].as_u64() == Some(pos_index as u64))
+                })
                 .unwrap_or_else(|| panic!("position {pos_index} not found"))
                 .clone();
             let position = Position {
@@ -251,13 +286,16 @@ fn main() {
             let nonce = pending_nonce(&to_hex(&borrower.pk_x()));
             let msg = close_message(&hasher, pos_index, &position, nonce);
             let sig = sign(&hasher, &borrower, msg, &mut rand::thread_rng());
-            post_json("/close", &serde_json::json!({
-                "pos_index": pos_index,
-                "borrower_pk_x": to_hex(&borrower.pk_x()),
-                "borrower_pk_y": to_hex(&borrower.pk_y()),
-                "nonce": nonce,
-                "sig": sig_json(&sig),
-            }));
+            post_json(
+                "/close",
+                &serde_json::json!({
+                    "pos_index": pos_index,
+                    "borrower_pk_x": to_hex(&borrower.pk_x()),
+                    "borrower_pk_y": to_hex(&borrower.pk_y()),
+                    "nonce": nonce,
+                    "sig": sig_json(&sig),
+                }),
+            );
         }
         "positions" => {
             let v = get_json(&format!("/positions/{}", &args[2]));

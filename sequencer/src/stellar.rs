@@ -28,7 +28,9 @@ pub enum ChainError {
 /// killed and reaped — a hung CLI/RPC subprocess must never wedge the
 /// watcher, batcher, or boot sequence (issue #11).
 fn run_with_timeout(mut cmd: Command, what: &str, timeout: Duration) -> Result<Output, ChainError> {
-    cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn()?;
     // Drain pipes on threads so a chatty child can't block on a full pipe
     // while we poll for exit.
@@ -52,14 +54,21 @@ fn run_with_timeout(mut cmd: Command, what: &str, timeout: Duration) -> Result<O
                 let _ = child.kill();
                 let _ = child.wait();
                 TIMEOUT_COUNT.fetch_add(1, Ordering::Relaxed);
-                return Err(ChainError::Timeout { what: what.to_string(), secs: timeout.as_secs() });
+                return Err(ChainError::Timeout {
+                    what: what.to_string(),
+                    secs: timeout.as_secs(),
+                });
             }
             None => std::thread::sleep(Duration::from_millis(25)),
         }
     };
     let stdout = out_thread.join().unwrap_or_default();
     let stderr = err_thread.join().unwrap_or_default();
-    Ok(Output { status, stdout, stderr })
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 impl From<HexError> for ChainError {
@@ -173,9 +182,15 @@ impl CliClient {
         // secret handling as the sequencer identity).
         let has_oracle_admin = if let Some(secret) = &cfg.oracle_admin_secret {
             let mut cmd = Command::new("stellar");
-            cmd.args(["keys", "add", ORACLE_IDENTITY, "--secret-key", "--overwrite"])
-                .env("SOROBAN_SECRET_KEY", secret)
-                .env("STELLAR_SECRET_KEY", secret);
+            cmd.args([
+                "keys",
+                "add",
+                ORACLE_IDENTITY,
+                "--secret-key",
+                "--overwrite",
+            ])
+            .env("SOROBAN_SECRET_KEY", secret)
+            .env("STELLAR_SECRET_KEY", secret);
             let o = run_with_timeout(cmd, "keys add (oracle)", cli_timeout)?;
             if !o.status.success() {
                 return Err(ChainError::Cli(format!(
@@ -199,7 +214,12 @@ impl CliClient {
         })
     }
 
-    fn invoke_on(&self, contract: &str, send: bool, func_and_args: &[&str]) -> Result<String, ChainError> {
+    fn invoke_on(
+        &self,
+        contract: &str,
+        send: bool,
+        func_and_args: &[&str],
+    ) -> Result<String, ChainError> {
         let mut cmd = Command::new("stellar");
         cmd.args([
             "contract",
@@ -219,7 +239,11 @@ impl CliClient {
         cmd.arg("--");
         cmd.args(func_and_args);
         let what = format!("invoke {}", func_and_args.first().unwrap_or(&"?"));
-        let timeout = if send { self.submit_timeout } else { self.cli_timeout };
+        let timeout = if send {
+            self.submit_timeout
+        } else {
+            self.cli_timeout
+        };
         let out = run_with_timeout(cmd, &what, timeout)?;
         if !out.status.success() {
             return Err(ChainError::Cli(format!(
@@ -264,22 +288,34 @@ impl StellarClient for CliClient {
                 serde_json::Value::Number(n) => n.to_string(),
                 other => return Err(ChainError::Parse(format!("oracle {field}: {other}"))),
             };
-            s.parse().map_err(|_| ChainError::Parse(format!("oracle {field}: {s}")))
+            s.parse()
+                .map_err(|_| ChainError::Parse(format!("oracle {field}: {s}")))
         };
         Ok((num("price")?, num("timestamp")?))
     }
 
     fn refresh_oracle_price(&self, price: u64) -> Result<(), ChainError> {
         if !self.has_oracle_admin {
-            return Err(ChainError::Cli("no oracle admin identity configured".into()));
+            return Err(ChainError::Cli(
+                "no oracle admin identity configured".into(),
+            ));
         }
         let mut cmd = Command::new("stellar");
         cmd.args([
-            "contract", "invoke", "--id", &self.oracle_id,
-            "--rpc-url", &self.rpc_url,
-            "--network-passphrase", &self.network_passphrase,
-            "--source-account", ORACLE_IDENTITY,
-            "--", "set_price", "--price", &price.to_string(),
+            "contract",
+            "invoke",
+            "--id",
+            &self.oracle_id,
+            "--rpc-url",
+            &self.rpc_url,
+            "--network-passphrase",
+            &self.network_passphrase,
+            "--source-account",
+            ORACLE_IDENTITY,
+            "--",
+            "set_price",
+            "--price",
+            &price.to_string(),
         ]);
         let out = run_with_timeout(cmd, "oracle set_price", self.submit_timeout)?;
         if !out.status.success() {
@@ -308,7 +344,13 @@ impl StellarClient for CliClient {
     fn get_pending_deposit(&self, asset: u32, seq: u64) -> Result<(Fr, u64), ChainError> {
         let out = self.invoke(
             false,
-            &["get_pending_deposit", "--asset", &asset.to_string(), "--seq", &seq.to_string()],
+            &[
+                "get_pending_deposit",
+                "--asset",
+                &asset.to_string(),
+                "--seq",
+                &seq.to_string(),
+            ],
         )?;
         let v: serde_json::Value =
             serde_json::from_str(&out).map_err(|e| ChainError::Parse(e.to_string()))?;
@@ -355,7 +397,11 @@ mod tests {
     }
     impl AdvancingChain {
         fn epoch(&self, reads: u64) -> u64 {
-            if reads >= self.advance_after { 2 } else { 1 }
+            if reads >= self.advance_after {
+                2
+            } else {
+                1
+            }
         }
     }
     impl StellarClient for AdvancingChain {
@@ -375,6 +421,9 @@ mod tests {
         fn dep_tail(&self, _asset: u32) -> Result<u64, ChainError> {
             Err(ChainError::Cli("unused".into()))
         }
+        fn dep_head(&self, _asset: u32) -> Result<u64, ChainError> {
+            Err(ChainError::Cli("unused".into()))
+        }
         fn get_pending_deposit(&self, _asset: u32, _seq: u64) -> Result<(Fr, u64), ChainError> {
             Err(ChainError::Cli("unused".into()))
         }
@@ -387,7 +436,10 @@ mod tests {
     /// not produce a mismatched pair — the retry converges on epoch 2.
     #[test]
     fn boot_reads_converge_when_chain_advances_between_calls() {
-        let chain = AdvancingChain { root_reads: AtomicU64::new(0), advance_after: 2 };
+        let chain = AdvancingChain {
+            root_reads: AtomicU64::new(0),
+            advance_after: 2,
+        };
         let (root, batch_num) = consistent_root_and_batch(&chain, 5).unwrap();
         assert_eq!(root, fr_from_u64(2));
         assert_eq!(batch_num, 2);
@@ -395,7 +447,10 @@ mod tests {
 
     #[test]
     fn boot_reads_accept_stable_chain_first_try() {
-        let chain = AdvancingChain { root_reads: AtomicU64::new(0), advance_after: 0 };
+        let chain = AdvancingChain {
+            root_reads: AtomicU64::new(0),
+            advance_after: 0,
+        };
         let (root, batch_num) = consistent_root_and_batch(&chain, 5).unwrap();
         assert_eq!(root, fr_from_u64(2));
         assert_eq!(batch_num, 2);
@@ -408,8 +463,14 @@ mod tests {
         let before = TIMEOUT_COUNT.load(Ordering::Relaxed);
         let start = Instant::now();
         let err = run_with_timeout(cmd, "sleep", Duration::from_millis(200)).unwrap_err();
-        assert!(start.elapsed() < Duration::from_secs(5), "child was not killed promptly");
-        assert!(matches!(err, ChainError::Timeout { .. }), "expected timeout, got {err:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "child was not killed promptly"
+        );
+        assert!(
+            matches!(err, ChainError::Timeout { .. }),
+            "expected timeout, got {err:?}"
+        );
         assert!(TIMEOUT_COUNT.load(Ordering::Relaxed) > before);
     }
 

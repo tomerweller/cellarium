@@ -62,10 +62,7 @@ fn deposit_fold_chain_matches_harness() {
 fn withdraw_fold_and_address_encoding_match_harness() {
     let env = Env::default();
     let v = vectors();
-    let dest = Address::from_string(&SString::from_str(
-        &env,
-        v["wd_dest"].as_str().unwrap(),
-    ));
+    let dest = Address::from_string(&SString::from_str(&env, v["wd_dest"].as_str().unwrap()));
 
     // address_to_field agrees with harness/src/l1.rs byte-for-byte.
     let dest_field = address_to_field(&env, &dest);
@@ -78,5 +75,8 @@ fn withdraw_fold_and_address_encoding_match_harness() {
         let amount: i128 = w["amount"].as_str().unwrap().parse().unwrap();
         acc = fold(&env, DOMAIN_WD2, &acc, &dest_field, asset, amount);
     }
-    assert_eq!(acc, word(&env, v["demo"]["withdraw_hash"].as_str().unwrap()));
+    assert_eq!(
+        acc,
+        word(&env, v["demo"]["withdraw_hash"].as_str().unwrap())
+    );
 }

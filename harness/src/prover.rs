@@ -126,12 +126,20 @@ pub fn to_repo_prover_toml(w: &RepoBatchWitness, instance_id: &Fr) -> String {
         let _ = writeln!(out, "borrower_cash = {}", u64_lit(c.borrower_cash));
         let _ = writeln!(out, "borrower_coll = {}", u64_lit(c.borrower_coll));
         let _ = writeln!(out, "borrower_nonce = {}", u64_lit(c.borrower_nonce));
-        let _ = writeln!(out, "borrower_siblings = {}", siblings_lit(&c.borrower_siblings));
+        let _ = writeln!(
+            out,
+            "borrower_siblings = {}",
+            siblings_lit(&c.borrower_siblings)
+        );
         let _ = writeln!(out, "lender_index = {}", u64_lit(c.lender_index as u64));
         let _ = writeln!(out, "lender_cash = {}", u64_lit(c.lender_cash));
         let _ = writeln!(out, "lender_coll = {}", u64_lit(c.lender_coll));
         let _ = writeln!(out, "lender_nonce = {}", u64_lit(c.lender_nonce));
-        let _ = writeln!(out, "lender_siblings = {}", siblings_lit(&c.lender_siblings));
+        let _ = writeln!(
+            out,
+            "lender_siblings = {}",
+            siblings_lit(&c.lender_siblings)
+        );
         let _ = writeln!(out, "interest = {}", u64_lit(c.interest));
         let _ = writeln!(out, "is_active = {}", bool_lit(c.is_active));
         sig_toml(&mut out, "closes.borrower_sig", &c.sig);
@@ -154,7 +162,11 @@ pub fn to_repo_prover_toml(w: &RepoBatchWitness, instance_id: &Fr) -> String {
         let _ = writeln!(out, "lender_cash = {}", u64_lit(l.lender_cash));
         let _ = writeln!(out, "lender_coll = {}", u64_lit(l.lender_coll));
         let _ = writeln!(out, "lender_nonce = {}", u64_lit(l.lender_nonce));
-        let _ = writeln!(out, "lender_siblings = {}", siblings_lit(&l.lender_siblings));
+        let _ = writeln!(
+            out,
+            "lender_siblings = {}",
+            siblings_lit(&l.lender_siblings)
+        );
         let _ = writeln!(out, "is_liquidation = {}", bool_lit(l.is_liquidation));
         let _ = writeln!(out, "is_active = {}", bool_lit(l.is_active));
     }
@@ -166,14 +178,22 @@ pub fn to_repo_prover_toml(w: &RepoBatchWitness, instance_id: &Fr) -> String {
         let _ = writeln!(out, "borrower_cash = {}", u64_lit(o.borrower_cash));
         let _ = writeln!(out, "borrower_coll = {}", u64_lit(o.borrower_coll));
         let _ = writeln!(out, "borrower_nonce = {}", u64_lit(o.borrower_nonce));
-        let _ = writeln!(out, "borrower_siblings = {}", siblings_lit(&o.borrower_siblings));
+        let _ = writeln!(
+            out,
+            "borrower_siblings = {}",
+            siblings_lit(&o.borrower_siblings)
+        );
         let _ = writeln!(out, "lender_pk_x = {}", fr_lit(&o.lender_pk_x));
         let _ = writeln!(out, "lender_pk_y = {}", fr_lit(&o.lender_pk_y));
         let _ = writeln!(out, "lender_index = {}", u64_lit(o.lender_index as u64));
         let _ = writeln!(out, "lender_cash = {}", u64_lit(o.lender_cash));
         let _ = writeln!(out, "lender_coll = {}", u64_lit(o.lender_coll));
         let _ = writeln!(out, "lender_nonce = {}", u64_lit(o.lender_nonce));
-        let _ = writeln!(out, "lender_siblings = {}", siblings_lit(&o.lender_siblings));
+        let _ = writeln!(
+            out,
+            "lender_siblings = {}",
+            siblings_lit(&o.lender_siblings)
+        );
         let _ = writeln!(out, "cash = {}", u64_lit(o.cash));
         let _ = writeln!(out, "coll = {}", u64_lit(o.coll));
         let _ = writeln!(out, "rate_bps = {}", u64_lit(o.rate_bps as u64));
@@ -193,7 +213,10 @@ pub fn to_repo_prover_toml(w: &RepoBatchWitness, instance_id: &Fr) -> String {
 
 pub fn repo_root() -> PathBuf {
     // harness/ -> repo root
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf()
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf()
 }
 
 /// The Noir workspace directory. `CIRCUITS_DIR` overrides the compile-time
@@ -227,7 +250,9 @@ pub fn prove(pkg: &str, prover_toml: &str) -> std::io::Result<PathBuf> {
         .env("PATH", path)
         .status()?;
     if !status.success() {
-        return Err(std::io::Error::other(format!("prove.sh {pkg} failed: {status}")));
+        return Err(std::io::Error::other(format!(
+            "prove.sh {pkg} failed: {status}"
+        )));
     }
     Ok(circuits.join("target").join(format!("{pkg}-out")))
 }

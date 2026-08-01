@@ -11,7 +11,12 @@ pub const DOMAIN_ADDR: u64 = 6;
 /// The contract implements the same function over `address.to_string()`.
 pub fn address_to_field(hasher: &Hasher, strkey: &str) -> Fr {
     let bytes = strkey.as_bytes();
-    assert_eq!(bytes.len(), 56, "expected 56-char strkey, got {}", bytes.len());
+    assert_eq!(
+        bytes.len(),
+        56,
+        "expected 56-char strkey, got {}",
+        bytes.len()
+    );
     let mut limb0 = [0u8; 32];
     let mut limb1 = [0u8; 32];
     limb0[4..].copy_from_slice(&bytes[..28]);

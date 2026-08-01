@@ -53,9 +53,8 @@ pub const REFUND_DELAY_SECS: u64 = 86_400;
 /// to this key are rejected — the secret is public, so any credit would be
 /// immediately drainable by anyone.
 pub const PAD_PK_X: [u8; 32] = [
-    0x0e, 0x60, 0x2b, 0x9d, 0xd6, 0xa3, 0xe8, 0xd0, 0x39, 0xa1, 0x7f, 0x06, 0x9a, 0xdd, 0x3f,
-    0x9c, 0x2a, 0x18, 0x7a, 0x8f, 0x62, 0x9a, 0x1d, 0xe6, 0x0a, 0x33, 0xa8, 0x06, 0x7b, 0x9b,
-    0x28, 0x42,
+    0x0e, 0x60, 0x2b, 0x9d, 0xd6, 0xa3, 0xe8, 0xd0, 0x39, 0xa1, 0x7f, 0x06, 0x9a, 0xdd, 0x3f, 0x9c,
+    0x2a, 0x18, 0x7a, 0x8f, 0x62, 0x9a, 0x1d, 0xe6, 0x0a, 0x33, 0xa8, 0x06, 0x7b, 0x9b, 0x28, 0x42,
 ];
 
 #[contracterror]
@@ -185,7 +184,7 @@ impl RollupContract {
         // see the deployment invariant on MAX_AMOUNT — per-asset total supply
         // <= u64::MAX bounds every L2 balance below the circuit's u64 range.
         let token_client = token::TokenClient::new(&env, &storage::get_token(&env, asset));
-        token_client.transfer(&from, &env.current_contract_address(), &amount);
+        token_client.transfer(&from, env.current_contract_address(), &amount);
 
         let seq = storage::enqueue_deposit(
             &env,
@@ -197,7 +196,13 @@ impl RollupContract {
                 enqueued_at: env.ledger().timestamp(),
             },
         );
-        events::Deposit { seq: &seq, asset: &asset, pk_x: &l2_pk_x, amount: &amount }.publish(&env);
+        events::Deposit {
+            seq: &seq,
+            asset: &asset,
+            pk_x: &l2_pk_x,
+            amount: &amount,
+        }
+        .publish(&env);
         Ok(seq)
     }
 
@@ -225,8 +230,13 @@ impl RollupContract {
         let token_client = token::TokenClient::new(&env, &storage::get_token(&env, asset));
         token_client.transfer(&env.current_contract_address(), &dep.from, &dep.amount);
         storage::dequeue_deposits(&env, asset, 1);
-        events::Refund { seq: &head, asset: &asset, to: &dep.from, amount: &dep.amount }
-            .publish(&env);
+        events::Refund {
+            seq: &head,
+            asset: &asset,
+            to: &dep.from,
+            amount: &dep.amount,
+        }
+        .publish(&env);
         Ok(head)
     }
 
@@ -290,8 +300,14 @@ impl RollupContract {
             let head = storage::dep_head(&env, asset);
             for seq in head..head + counts[asset as usize] as u64 {
                 let dep = storage::get_deposit(&env, asset, seq);
-                deposit_hash =
-                    publics::fold(&env, publics::DOMAIN_DEP2, &deposit_hash, &dep.pk_x, asset, dep.amount);
+                deposit_hash = publics::fold(
+                    &env,
+                    publics::DOMAIN_DEP2,
+                    &deposit_hash,
+                    &dep.pk_x,
+                    asset,
+                    dep.amount,
+                );
             }
         }
 
@@ -304,8 +320,14 @@ impl RollupContract {
                 return Err(RollupError::InvalidAmount);
             }
             let dest_field = publics::address_to_field(&env, &wd.dest);
-            withdraw_hash =
-                publics::fold(&env, publics::DOMAIN_WD2, &withdraw_hash, &dest_field, wd.asset, wd.amount);
+            withdraw_hash = publics::fold(
+                &env,
+                publics::DOMAIN_WD2,
+                &withdraw_hash,
+                &dest_field,
+                wd.asset,
+                wd.amount,
+            );
         }
 
         let mut pis = Bytes::new(&env);
@@ -315,7 +337,11 @@ impl RollupContract {
         publics::append_field(&env, &mut pis, &withdraw_hash);
         publics::append_field(&env, &mut pis, &envelope.da_commitment);
         publics::append_field(&env, &mut pis, &publics::u64_word(&env, envelope.batch_ts));
-        publics::append_field(&env, &mut pis, &publics::u128_word(&env, price_data.price as u128));
+        publics::append_field(
+            &env,
+            &mut pis,
+            &publics::u128_word(&env, price_data.price as u128),
+        );
         // 8th PI (issue #1 L10): bind the proof to THIS deployment. Two
         // instances sharing a VK and genesis root would otherwise accept
         // each other's proofs.

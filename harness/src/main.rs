@@ -26,7 +26,8 @@ fn main() {
         // Witness vectors for the circuit repo_test.nr + settle_test.nr suites.
         "noir-repo-vectors" => {
             let path = "circuits/lib/src/repo_vectors.nr";
-            std::fs::write(path, harness::noir_repo_vectors::emit()).expect("write repo_vectors.nr");
+            std::fs::write(path, harness::noir_repo_vectors::emit())
+                .expect("write repo_vectors.nr");
             println!("wrote {path}");
             let path = "circuits/lib/src/settle_vectors.nr";
             std::fs::write(path, harness::noir_repo_vectors::emit_settle())
@@ -38,7 +39,10 @@ fn main() {
             let cash: u64 = std::env::args().nth(2).unwrap().parse().unwrap();
             let rate: u32 = std::env::args().nth(3).unwrap().parse().unwrap();
             let elapsed: u64 = std::env::args().nth(4).unwrap().parse().unwrap();
-            println!("{}", harness::settle::interest(cash, rate, elapsed).expect("interest overflow"));
+            println!(
+                "{}",
+                harness::settle::interest(cash, rate, elapsed).expect("interest overflow")
+            );
         }
         // Deterministic repo demo batch -> Prover.toml -> bb -> fixtures/batch_repo.
         "demo-repo-batch" => demo_repo_batch(),
@@ -64,7 +68,12 @@ fn vectors() {
     );
     println!(
         "hash4(1, 2, 3, 4)      = {}",
-        to_hex(&hasher.hash(&[fr_from_u64(1), fr_from_u64(2), fr_from_u64(3), fr_from_u64(4)]))
+        to_hex(&hasher.hash(&[
+            fr_from_u64(1),
+            fr_from_u64(2),
+            fr_from_u64(3),
+            fr_from_u64(4)
+        ]))
     );
 
     let empty = Tree::new();
@@ -156,7 +165,16 @@ fn demo_batch() {
 
     let mut tree = Tree::new();
     let txs = [
-        make_signed_tx(&hasher, &alice, bob.pk_x(), Asset::Cash, 200, 0, false, &mut rng),
+        make_signed_tx(
+            &hasher,
+            &alice,
+            bob.pk_x(),
+            Asset::Cash,
+            200,
+            0,
+            false,
+            &mut rng,
+        ),
         make_signed_tx(&hasher, &bob, wd_field, Asset::Coll, 100, 0, true, &mut rng),
     ];
     let witness = build_batch(
@@ -165,8 +183,16 @@ fn demo_batch() {
         2,
         4,
         &[
-            DepositRequest { pk_x: alice.pk_x(), asset: Asset::Cash, amount: 1000 },
-            DepositRequest { pk_x: bob.pk_x(), asset: Asset::Coll, amount: 500 },
+            DepositRequest {
+                pk_x: alice.pk_x(),
+                asset: Asset::Cash,
+                amount: 1000,
+            },
+            DepositRequest {
+                pk_x: bob.pk_x(),
+                asset: Asset::Coll,
+                amount: 500,
+            },
         ],
         &txs,
     )
@@ -248,8 +274,16 @@ fn demo_repo_batch() {
 
     let mut state = L2State::new();
     let deposits = [
-        DepositRequest { pk_x: alice.pk_x(), asset: Asset::Cash, amount: 10_000_000 },
-        DepositRequest { pk_x: bob.pk_x(), asset: Asset::Coll, amount: 5_000_000 },
+        DepositRequest {
+            pk_x: alice.pk_x(),
+            asset: Asset::Cash,
+            amount: 10_000_000,
+        },
+        DepositRequest {
+            pk_x: bob.pk_x(),
+            asset: Asset::Coll,
+            amount: 5_000_000,
+        },
     ];
     let position = Position {
         borrower_pk_x: bob.pk_x(),
@@ -272,8 +306,26 @@ fn demo_repo_batch() {
         lender_sig: sign_with_nonce(&hasher, &alice, open_msg, ark_grumpkin::Fr::from(9102u64)),
     };
     let txs = [
-        make_signed_tx(&hasher, &alice, bob.pk_x(), Asset::Cash, 250_000, 1, false, &mut rng),
-        make_signed_tx(&hasher, &bob, wd_field, Asset::Coll, 100_000, 1, true, &mut rng),
+        make_signed_tx(
+            &hasher,
+            &alice,
+            bob.pk_x(),
+            Asset::Cash,
+            250_000,
+            1,
+            false,
+            &mut rng,
+        ),
+        make_signed_tx(
+            &hasher,
+            &bob,
+            wd_field,
+            Asset::Coll,
+            100_000,
+            1,
+            true,
+            &mut rng,
+        ),
     ];
     let witness = build_repo_batch(
         &hasher,
@@ -395,15 +447,47 @@ fn demo_batch_sized(d: usize, n: usize, pkg: &str) {
         let to = &users[(i + 1) % d];
         let nonce = next_nonce(from);
         // Spend the asset this user was funded with.
-        let asset = if from < d / 2 { Asset::Cash } else { Asset::Coll };
-        txs.push(make_signed_tx(&hasher, &users[from], to.pk_x(), asset, 50 + i as u64, nonce, false, &mut rng));
+        let asset = if from < d / 2 {
+            Asset::Cash
+        } else {
+            Asset::Coll
+        };
+        txs.push(make_signed_tx(
+            &hasher,
+            &users[from],
+            to.pk_x(),
+            asset,
+            50 + i as u64,
+            nonce,
+            false,
+            &mut rng,
+        ));
     }
     let n0 = next_nonce(0);
-    txs.push(make_signed_tx(&hasher, &users[0], wd_field, Asset::Cash, 77, n0, true, &mut rng));
+    txs.push(make_signed_tx(
+        &hasher,
+        &users[0],
+        wd_field,
+        Asset::Cash,
+        77,
+        n0,
+        true,
+        &mut rng,
+    ));
     let n1 = next_nonce(1);
-    txs.push(make_signed_tx(&hasher, &users[1], wd_field, Asset::Cash, 88, n1, true, &mut rng));
+    txs.push(make_signed_tx(
+        &hasher,
+        &users[1],
+        wd_field,
+        Asset::Cash,
+        88,
+        n1,
+        true,
+        &mut rng,
+    ));
 
-    let witness = build_batch(&hasher, &mut tree, d, n, &deposits, &txs).expect("demo batch must build");
+    let witness =
+        build_batch(&hasher, &mut tree, d, n, &deposits, &txs).expect("demo batch must build");
     println!("new_root = {}", to_hex(&witness.new_root));
 
     let toml = prover::to_prover_toml(&witness);
@@ -426,11 +510,28 @@ fn vectors_json() {
 
     // Primitive vectors (mirrored as pinned constants in circuits/lib tests).
     let hash2 = hasher.hash2(fr_from_u64(1), fr_from_u64(2));
-    let hash4 = hasher.hash(&[fr_from_u64(1), fr_from_u64(2), fr_from_u64(3), fr_from_u64(4)]);
-    let da_fold = hasher.hash(&[fr_from_u64(harness::batch::DOMAIN_DA), fr_from_u64(0), fr_from_u64(42)]);
+    let hash4 = hasher.hash(&[
+        fr_from_u64(1),
+        fr_from_u64(2),
+        fr_from_u64(3),
+        fr_from_u64(4),
+    ]);
+    let da_fold = hasher.hash(&[
+        fr_from_u64(harness::batch::DOMAIN_DA),
+        fr_from_u64(0),
+        fr_from_u64(42),
+    ]);
     let empty_root = T::new().root(&hasher);
     let mut t5 = T::new();
-    t5.set(5, Account { pk_x: fr_from_u64(1234), cash: 100, coll: 40, nonce: 0 });
+    t5.set(
+        5,
+        Account {
+            pk_x: fr_from_u64(1234),
+            cash: 100,
+            coll: 40,
+            nonce: 0,
+        },
+    );
     let bal_hash = T::bal_hash(&hasher, 100, 40);
     let leaf = T::leaf_value(&hasher, t5.get(5));
     let root5 = t5.root(&hasher);
@@ -481,7 +582,16 @@ fn vectors_json() {
     let wd_field = address_to_field(&hasher, &wd_dest);
     let mut tree = T::new();
     let txs = [
-        make_signed_tx(&hasher, &alice, bob.pk_x(), Asset::Cash, 200, 0, false, &mut rng),
+        make_signed_tx(
+            &hasher,
+            &alice,
+            bob.pk_x(),
+            Asset::Cash,
+            200,
+            0,
+            false,
+            &mut rng,
+        ),
         make_signed_tx(&hasher, &bob, wd_field, Asset::Coll, 100, 0, true, &mut rng),
     ];
     let w = build_batch(
@@ -490,13 +600,29 @@ fn vectors_json() {
         2,
         4,
         &[
-            DepositRequest { pk_x: alice.pk_x(), asset: Asset::Cash, amount: 1000 },
-            DepositRequest { pk_x: bob.pk_x(), asset: Asset::Coll, amount: 500 },
+            DepositRequest {
+                pk_x: alice.pk_x(),
+                asset: Asset::Cash,
+                amount: 1000,
+            },
+            DepositRequest {
+                pk_x: bob.pk_x(),
+                asset: Asset::Coll,
+                amount: 500,
+            },
         ],
         &txs,
     )
     .expect("demo scenario must build");
-    let msg1 = harness::batch::tx_message(&hasher, alice.pk_x(), bob.pk_x(), Asset::Cash, 200, 0, false);
+    let msg1 = harness::batch::tx_message(
+        &hasher,
+        alice.pk_x(),
+        bob.pk_x(),
+        Asset::Cash,
+        200,
+        0,
+        false,
+    );
     // Read-auth challenge (issue #1 L12): wallet signs, sequencer verifies.
     let auth_msg = harness::batch::auth_message(&hasher, alice.pk_x(), 1_700_000_000);
 
@@ -555,7 +681,10 @@ fn vectors_json() {
         },
     });
     let path = "fixtures/vectors.json";
-    std::fs::write(path, format!("{}\n", serde_json::to_string_pretty(&json).unwrap()))
-        .expect("write vectors.json");
+    std::fs::write(
+        path,
+        format!("{}\n", serde_json::to_string_pretty(&json).unwrap()),
+    )
+    .expect("write vectors.json");
     println!("wrote {path}");
 }

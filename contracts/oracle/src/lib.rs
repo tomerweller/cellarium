@@ -46,7 +46,10 @@ impl OracleContract {
         if price <= 0 {
             return Err(OracleError::InvalidPrice);
         }
-        let data = PriceData { price, timestamp: env.ledger().timestamp() };
+        let data = PriceData {
+            price,
+            timestamp: env.ledger().timestamp(),
+        };
         env.storage().instance().set(&DataKey::Price, &data);
         Ok(())
     }
@@ -85,7 +88,10 @@ mod test {
         client.set_price(&12_345_678i128);
         assert_eq!(
             client.lastprice(),
-            Some(PriceData { price: 12_345_678, timestamp: 1_000 })
+            Some(PriceData {
+                price: 12_345_678,
+                timestamp: 1_000
+            })
         );
 
         // Update overwrites price and timestamp.
@@ -93,7 +99,10 @@ mod test {
         client.set_price(&9_999_999i128);
         assert_eq!(
             client.lastprice(),
-            Some(PriceData { price: 9_999_999, timestamp: 2_000 })
+            Some(PriceData {
+                price: 9_999_999,
+                timestamp: 2_000
+            })
         );
     }
 
@@ -101,8 +110,14 @@ mod test {
     fn rejects_non_positive_price() {
         let (env, client, _admin) = setup();
         env.mock_all_auths();
-        assert_eq!(client.try_set_price(&0i128), Err(Ok(OracleError::InvalidPrice)));
-        assert_eq!(client.try_set_price(&-5i128), Err(Ok(OracleError::InvalidPrice)));
+        assert_eq!(
+            client.try_set_price(&0i128),
+            Err(Ok(OracleError::InvalidPrice))
+        );
+        assert_eq!(
+            client.try_set_price(&-5i128),
+            Err(Ok(OracleError::InvalidPrice))
+        );
     }
 
     #[test]

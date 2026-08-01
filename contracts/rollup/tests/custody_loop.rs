@@ -73,12 +73,21 @@ fn setup() -> Setup<'static> {
     // The fixture proof binds instance_id = address_to_field(rollup) as its
     // 8th public input (issue #1 L10), so the contract must live at the
     // exact address the fixture was generated for.
-    let instance_addr =
-        Address::from_string(&SString::from_str(&env, meta["instance_addr"].as_str().unwrap()));
+    let instance_addr = Address::from_string(&SString::from_str(
+        &env,
+        meta["instance_addr"].as_str().unwrap(),
+    ));
     let rollup_id = env.register_at(
         &instance_addr,
         RollupContract,
-        (cash_sac.address(), coll_sac.address(), oracle_id, operator.clone(), vk, genesis),
+        (
+            cash_sac.address(),
+            coll_sac.address(),
+            oracle_id,
+            operator.clone(),
+            vk,
+            genesis,
+        ),
     );
     let rollup = RollupContractClient::new(&env, &rollup_id);
 
@@ -117,10 +126,18 @@ fn fixture_envelope(env: &Env, meta: &serde_json::Value) -> BatchEnvelope {
 }
 
 fn do_deposits(s: &Setup) {
-    let alice_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()));
-    let bob_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()));
-    s.rollup.deposit(&s.alice_l1, &alice_pk, &ASSET_CASH, &10_000_000);
-    s.rollup.deposit(&s.bob_l1, &bob_pk, &ASSET_COLL, &5_000_000);
+    let alice_pk = BytesN::from_array(
+        &s.env,
+        &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()),
+    );
+    let bob_pk = BytesN::from_array(
+        &s.env,
+        &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()),
+    );
+    s.rollup
+        .deposit(&s.alice_l1, &alice_pk, &ASSET_CASH, &10_000_000);
+    s.rollup
+        .deposit(&s.bob_l1, &bob_pk, &ASSET_COLL, &5_000_000);
 }
 
 #[test]
@@ -169,8 +186,14 @@ fn fixture_public_inputs_match_contract_assembly() {
     // match meta (instance_id — issue #1 L10).
     let meta: serde_json::Value = serde_json::from_str(META).unwrap();
     assert_eq!(PUBLIC_INPUTS.len(), 256);
-    assert_eq!(&PUBLIC_INPUTS[..32], &hex32(meta["old_state_root"].as_str().unwrap()));
-    assert_eq!(&PUBLIC_INPUTS[32..64], &hex32(meta["new_state_root"].as_str().unwrap()));
+    assert_eq!(
+        &PUBLIC_INPUTS[..32],
+        &hex32(meta["old_state_root"].as_str().unwrap())
+    );
+    assert_eq!(
+        &PUBLIC_INPUTS[32..64],
+        &hex32(meta["new_state_root"].as_str().unwrap())
+    );
     // batch_ts word (6th PI).
     let mut ts_word = [0u8; 32];
     ts_word[24..].copy_from_slice(&meta["batch_ts"].as_u64().unwrap().to_be_bytes());
@@ -182,10 +205,15 @@ fn fixture_public_inputs_match_contract_assembly() {
     assert_eq!(&PUBLIC_INPUTS[192..224], &price_word);
     // instance word (8th PI) = address_to_field(fixture rollup address);
     // the contract derives the same from env.current_contract_address().
-    assert_eq!(&PUBLIC_INPUTS[224..256], &hex32(meta["instance_id"].as_str().unwrap()));
+    assert_eq!(
+        &PUBLIC_INPUTS[224..256],
+        &hex32(meta["instance_id"].as_str().unwrap())
+    );
     let env = Env::default();
-    let addr =
-        Address::from_string(&SString::from_str(&env, meta["instance_addr"].as_str().unwrap()));
+    let addr = Address::from_string(&SString::from_str(
+        &env,
+        meta["instance_addr"].as_str().unwrap(),
+    ));
     assert_eq!(
         rollup::publics::address_to_field(&env, &addr),
         BytesN::from_array(&env, &hex32(meta["instance_id"].as_str().unwrap()))
@@ -281,15 +309,27 @@ fn reasseted_or_tampered_withdrawal_fails() {
     // Wrong asset (cash pool instead of coll).
     let mut envelope = fixture_envelope(&s.env, &s.meta);
     let wd = envelope.withdrawals.get(0).unwrap();
-    envelope.withdrawals =
-        vec![&s.env, Withdrawal { dest: wd.dest.clone(), asset: ASSET_CASH, amount: wd.amount }];
+    envelope.withdrawals = vec![
+        &s.env,
+        Withdrawal {
+            dest: wd.dest.clone(),
+            asset: ASSET_CASH,
+            amount: wd.amount,
+        },
+    ];
     assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
 
     // Wrong amount.
     let mut envelope = fixture_envelope(&s.env, &s.meta);
     let wd = envelope.withdrawals.get(0).unwrap();
-    envelope.withdrawals =
-        vec![&s.env, Withdrawal { dest: wd.dest.clone(), asset: wd.asset, amount: wd.amount + 1 }];
+    envelope.withdrawals = vec![
+        &s.env,
+        Withdrawal {
+            dest: wd.dest.clone(),
+            asset: wd.asset,
+            amount: wd.amount + 1,
+        },
+    ];
     assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
 
     // Redirected destination.
@@ -297,7 +337,11 @@ fn reasseted_or_tampered_withdrawal_fails() {
     let wd = envelope.withdrawals.get(0).unwrap();
     envelope.withdrawals = vec![
         &s.env,
-        Withdrawal { dest: Address::generate(&s.env), asset: wd.asset, amount: wd.amount },
+        Withdrawal {
+            dest: Address::generate(&s.env),
+            asset: wd.asset,
+            amount: wd.amount,
+        },
     ];
     assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
 }
@@ -324,18 +368,36 @@ fn missing_deposits_fail() {
 #[test]
 fn deposit_validation() {
     let s = setup();
-    let pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()));
-    assert!(s.rollup.try_deposit(&s.alice_l1, &pk, &ASSET_CASH, &0).is_err());
-    assert!(s.rollup.try_deposit(&s.alice_l1, &pk, &ASSET_CASH, &-5).is_err());
+    let pk = BytesN::from_array(
+        &s.env,
+        &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()),
+    );
+    assert!(s
+        .rollup
+        .try_deposit(&s.alice_l1, &pk, &ASSET_CASH, &0)
+        .is_err());
+    assert!(s
+        .rollup
+        .try_deposit(&s.alice_l1, &pk, &ASSET_CASH, &-5)
+        .is_err());
     assert!(s
         .rollup
         .try_deposit(&s.alice_l1, &pk, &ASSET_CASH, &(i128::from(u64::MAX) + 1))
         .is_err());
     assert!(s.rollup.try_deposit(&s.alice_l1, &pk, &2u32, &100).is_err());
     let non_canonical = BytesN::from_array(&s.env, &[0xffu8; 32]);
-    assert!(s.rollup.try_deposit(&s.alice_l1, &non_canonical, &ASSET_CASH, &100).is_err());
+    assert!(s
+        .rollup
+        .try_deposit(&s.alice_l1, &non_canonical, &ASSET_CASH, &100)
+        .is_err());
     let zero = BytesN::from_array(&s.env, &[0u8; 32]);
-    assert!(s.rollup.try_deposit(&s.alice_l1, &zero, &ASSET_CASH, &100).is_err());
+    assert!(s
+        .rollup
+        .try_deposit(&s.alice_l1, &zero, &ASSET_CASH, &100)
+        .is_err());
     let pad = BytesN::from_array(&s.env, &rollup::PAD_PK_X);
-    assert!(s.rollup.try_deposit(&s.alice_l1, &pad, &ASSET_CASH, &100).is_err());
+    assert!(s
+        .rollup
+        .try_deposit(&s.alice_l1, &pad, &ASSET_CASH, &100)
+        .is_err());
 }

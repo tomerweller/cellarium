@@ -23,8 +23,7 @@ pub const DOMAIN_SIG: u64 = 3;
 
 /// Padding account x-coordinate (sk=7·G). Must never receive deposits or
 /// authorize active spends — the secret is public (see circuits/lib/src/tx.nr).
-pub const PAD_PK_X_HEX: &str =
-    "0x0e602b9dd6a3e8d039a17f069add3f9c2a187a8f629a1de60a33a8067b9b2842";
+pub const PAD_PK_X_HEX: &str = "0x0e602b9dd6a3e8d039a17f069add3f9c2a187a8f629a1de60a33a8067b9b2842";
 
 pub fn coord_to_fr(c: &Coord) -> Fr {
     let bytes = c.into_bigint().to_bytes_be();
@@ -141,7 +140,12 @@ fn challenge(hasher: &Hasher, r_x: Fr, pk_x: Fr, msg: Fr) -> Scalar {
     Scalar::from_be_bytes_mod_order(&e)
 }
 
-pub fn sign(hasher: &Hasher, keypair: &Keypair, msg: Fr, rng: &mut impl rand::RngCore) -> Signature {
+pub fn sign(
+    hasher: &Hasher,
+    keypair: &Keypair,
+    msg: Fr,
+    rng: &mut impl rand::RngCore,
+) -> Signature {
     sign_with_nonce(hasher, keypair, msg, Scalar::rand(rng))
 }
 
