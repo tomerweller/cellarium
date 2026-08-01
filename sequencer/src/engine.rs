@@ -691,29 +691,47 @@ impl Engine {
                 "pending transfers must be included before an intent can be signed".into(),
             ));
         }
+        // Bound the intent store (issue #20): a valid signed intent can be
+        // replayed forever, so resubmission must be idempotent and the table
+        // capped. Expired intents are pruned opportunistically (their signed
+        // nonces go stale quickly regardless).
+        const INTENT_TTL_SECS: u64 = 24 * 3600;
+        const INTENTS_MAX_OPEN: u64 = 1_000;
+        const INTENTS_MAX_PER_INITIATOR: u64 = 25;
+        db::intents_prune_expired(&self.conn, INTENT_TTL_SECS)?;
         let (lo, hi) = sig.s_limbs();
-        let id = db::insert_intent(
-            &self.conn,
-            &db::IntentRow {
-                id: 0,
-                initiator: w.initiator.clone(),
-                borrower_pk_x: fr_hex(&position.borrower_pk_x),
-                borrower_pk_y: fr_hex(&borrower_pk_y),
-                lender_pk_x: fr_hex(&position.lender_pk_x),
-                lender_pk_y: fr_hex(&lender_pk_y),
-                cash: position.cash.to_string(),
-                coll: position.coll.to_string(),
-                rate_bps: position.rate_bps,
-                haircut_bps: position.haircut_bps,
-                open_ts: position.open_ts,
-                maturity_ts: position.maturity_ts,
-                borrower_nonce: w.borrower_nonce,
-                lender_nonce: w.lender_nonce,
-                sig: [fr_hex(&sig.r_x), fr_hex(&sig.r_y), fr_hex(&lo), fr_hex(&hi)],
-                status: "open".into(),
-                created_at: 0,
-            },
-        )?;
+        let row = db::IntentRow {
+            id: 0,
+            initiator: w.initiator.clone(),
+            borrower_pk_x: fr_hex(&position.borrower_pk_x),
+            borrower_pk_y: fr_hex(&borrower_pk_y),
+            lender_pk_x: fr_hex(&position.lender_pk_x),
+            lender_pk_y: fr_hex(&lender_pk_y),
+            cash: position.cash.to_string(),
+            coll: position.coll.to_string(),
+            rate_bps: position.rate_bps,
+            haircut_bps: position.haircut_bps,
+            open_ts: position.open_ts,
+            maturity_ts: position.maturity_ts,
+            borrower_nonce: w.borrower_nonce,
+            lender_nonce: w.lender_nonce,
+            sig: [fr_hex(&sig.r_x), fr_hex(&sig.r_y), fr_hex(&lo), fr_hex(&hi)],
+            status: "open".into(),
+            created_at: 0,
+        };
+        // Replaying the same signed intent returns the original row.
+        if let Some(id) = db::find_open_intent_duplicate(&self.conn, &row)? {
+            return Ok(TxReceipt { id, status: "open".into() });
+        }
+        if db::intents_count_open(&self.conn)? >= INTENTS_MAX_OPEN {
+            return Err(ApiError::RateLimited("intent store is full; retry later".into()));
+        }
+        if db::intents_count_open_by_initiator(&self.conn, &fr_hex(&signer_x))?
+            >= INTENTS_MAX_PER_INITIATOR
+        {
+            return Err(ApiError::RateLimited("too many open intents for this account".into()));
+        }
+        let id = db::insert_intent(&self.conn, &row)?;
         Ok(TxReceipt { id, status: "open".into() })
     }
 
@@ -2044,6 +2062,7 @@ mod engine_tests {
                 listen_addr: String::new(),
                 batch_max_wait_secs: max_wait,
                 tick_secs: 1,
+                trusted_proxy_header: None,
                 cli_timeout_secs: 30,
                 submit_timeout_secs: 180,
                 circuit_pkg: "batch_repo".into(),
@@ -2213,6 +2232,34 @@ mod engine_tests {
             sig: wire_sig(&csig),
         };
         assert!(matches!(e.submit_close(close), Err(ApiError::QueueConflict(_))));
+    }
+
+    /// Issue #20: replaying the same signed intent must not grow the store,
+    /// and per-initiator queues are capped.
+    #[test]
+    fn intent_replay_is_idempotent_and_capped() {
+        let mut e = engine(2, 4, 3600);
+        let (alice, bob) = (kp(101), kp(202));
+        fund(&mut e, 0, &alice, 1_000_000);
+        fund(&mut e, 1, &bob, 500_000);
+
+        let w = wire_intent("borrower", &alice, &bob, 0, 0);
+        let r1 = e.submit_intent(w.clone()).unwrap();
+        for _ in 0..10 {
+            assert_eq!(e.submit_intent(w.clone()).unwrap().id, r1.id, "replay created a new row");
+        }
+        assert_eq!(db::intents_count_open(&e.conn).unwrap(), 1);
+
+        // Distinct intents count toward the per-initiator cap.
+        for i in 1..25u64 {
+            e.submit_intent(wire_intent("borrower", &alice, &bob, i, i)).unwrap();
+        }
+        assert!(matches!(
+            e.submit_intent(wire_intent("borrower", &alice, &bob, 99, 99)),
+            Err(ApiError::RateLimited(_))
+        ));
+        // The counterparty is unaffected by the initiator's cap.
+        e.submit_intent(wire_intent("lender", &alice, &bob, 50, 50)).unwrap();
     }
 
     /// Issue #45: a reused nonce is idempotent only for identical content;

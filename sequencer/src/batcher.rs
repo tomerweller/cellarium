@@ -425,6 +425,7 @@ mod tests {
             listen_addr: String::new(),
             batch_max_wait_secs: 0,
             tick_secs: 1,
+            trusted_proxy_header: None,
             cli_timeout_secs: 5,
             submit_timeout_secs: 5,
             circuit_pkg: "batch_repo".into(),

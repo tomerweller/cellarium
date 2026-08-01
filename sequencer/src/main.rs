@@ -92,7 +92,13 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|e| format!("bind {}: {e}", cfg.listen_addr))?;
     tracing::info!(addr = %cfg.listen_addr, "listening");
-    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+    // ConnectInfo gives the rate limiter a spoof-proof fallback identity
+    // when no trusted proxy header is present (issue #20).
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal());
 
     // Supervise: the watcher and batcher loop forever, so their future
     // resolving means the task panicked or was aborted. Exit non-zero and

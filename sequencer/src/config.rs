@@ -19,6 +19,10 @@ pub struct Config {
     pub batch_max_wait_secs: u64,
     /// Watcher/batcher poll interval.
     pub tick_secs: u64,
+    /// Client-IP header set by this deployment's fronting proxy, trusted for
+    /// rate limiting (issue #20). Empty env value disables header trust
+    /// entirely (socket peer address only).
+    pub trusted_proxy_header: Option<String>,
     /// Hard deadline for read/simulate/key CLI subprocesses (issue #11).
     pub cli_timeout_secs: u64,
     /// Hard deadline for transaction-sending CLI subprocesses (sign+send+confirm).
@@ -66,6 +70,8 @@ impl Config {
             listen_addr: var_or("LISTEN_ADDR", "0.0.0.0:8080"),
             batch_max_wait_secs: var_or("BATCH_MAX_WAIT_SECS", "30").parse().map_err(|_| "bad BATCH_MAX_WAIT_SECS")?,
             tick_secs: var_or("TICK_SECS", "5").parse().map_err(|_| "bad TICK_SECS")?,
+            trusted_proxy_header: Some(var_or("TRUSTED_PROXY_HEADER", "fly-client-ip"))
+                .filter(|s| !s.is_empty()),
             cli_timeout_secs: var_or("CLI_TIMEOUT_SECS", "30").parse().map_err(|_| "bad CLI_TIMEOUT_SECS")?,
             submit_timeout_secs: var_or("SUBMIT_TIMEOUT_SECS", "180").parse().map_err(|_| "bad SUBMIT_TIMEOUT_SECS")?,
             circuit_pkg,

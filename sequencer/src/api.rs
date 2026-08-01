@@ -51,6 +51,10 @@ const TX_PER_MINUTE: u32 = 30;
 #[derive(Clone, Default)]
 struct RateLimiter {
     windows: Arc<Mutex<HashMap<String, (Instant, u32)>>>,
+    /// Client-IP header this deployment's fronting proxy sets (issue #20):
+    /// forwarding headers are attacker-controlled on a direct connection, so
+    /// only the configured one is believed. None = use the socket peer only.
+    trusted_header: Option<String>,
 }
 
 impl RateLimiter {
@@ -70,22 +74,24 @@ impl RateLimiter {
     }
 }
 
-/// Client identity for rate limiting: Fly's edge sets Fly-Client-IP; fall
-/// back to the first X-Forwarded-For hop, then a shared bucket.
-fn client_key(req: &Request) -> String {
-    let header = |name: &str| {
-        req.headers()
-            .get(name)
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
-    };
-    header("fly-client-ip")
-        .or_else(|| header("x-forwarded-for"))
+/// Client identity for rate limiting: only the deployment's configured
+/// proxy header is trusted (Fly's edge strips/sets Fly-Client-IP; a bare
+/// X-Forwarded-For from a direct connection is trivially spoofable —
+/// issue #20). Otherwise fall back to the socket peer address.
+fn client_key(req: &Request, trusted_header: Option<&str>) -> String {
+    if let Some(name) = trusted_header {
+        if let Some(v) = req.headers().get(name).and_then(|v| v.to_str().ok()) {
+            return v.split(',').next().unwrap_or(v).trim().to_string();
+        }
+    }
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|ci| ci.0.ip().to_string())
         .unwrap_or_else(|| "direct".into())
 }
 
 async fn rate_limit(State(rl): State<RateLimiter>, req: Request, next: Next) -> Response {
-    if !rl.allow(&client_key(&req)) {
+    if !rl.allow(&client_key(&req, rl.trusted_header.as_deref())) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({
@@ -164,7 +170,10 @@ where
 
 pub fn router(state: AppState) -> Router {
     use tower_http::cors::CorsLayer;
-    let limiter = RateLimiter::default();
+    let limiter = RateLimiter {
+        trusted_header: state.cfg.trusted_proxy_header.clone(),
+        ..RateLimiter::default()
+    };
     Router::new()
         // Liveness only: the process is up and serving HTTP.
         .route("/healthz", get(|| async { "ok" }))

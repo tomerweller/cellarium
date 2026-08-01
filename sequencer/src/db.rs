@@ -824,7 +824,7 @@ pub fn intents_for_counterparty(conn: &Connection, pk_x: &str) -> DbResult<Vec<I
         "SELECT {INTENT_COLS} FROM intents WHERE status = 'open' AND
            ((initiator = 'borrower' AND lender_pk_x = ?1) OR
             (initiator = 'lender' AND borrower_pk_x = ?1))
-         ORDER BY id DESC"
+         ORDER BY id DESC LIMIT 200"
     ))?;
     let rows = stmt.query_map([pk_x], intent_row)?;
     rows.collect()
@@ -836,7 +836,7 @@ pub fn intents_by_initiator(conn: &Connection, pk_x: &str) -> DbResult<Vec<Inten
         "SELECT {INTENT_COLS} FROM intents WHERE status = 'open' AND
            ((initiator = 'borrower' AND borrower_pk_x = ?1) OR
             (initiator = 'lender' AND lender_pk_x = ?1))
-         ORDER BY id DESC"
+         ORDER BY id DESC LIMIT 200"
     ))?;
     let rows = stmt.query_map([pk_x], intent_row)?;
     rows.collect()
@@ -845,6 +845,59 @@ pub fn intents_by_initiator(conn: &Connection, pk_x: &str) -> DbResult<Vec<Inten
 pub fn intent_set_status(conn: &Connection, id: i64, status: &str) -> DbResult<()> {
     conn.execute("UPDATE intents SET status = ?1 WHERE id = ?2", params![status, id])?;
     Ok(())
+}
+
+/// Exact duplicate of a still-open signed intent (issue #20): resubmission
+/// must be idempotent, not another row.
+pub fn find_open_intent_duplicate(conn: &Connection, r: &IntentRow) -> DbResult<Option<i64>> {
+    conn.query_row(
+        "SELECT id FROM intents WHERE status = 'open'
+           AND initiator = ?1 AND borrower_pk_x = ?2 AND lender_pk_x = ?3
+           AND cash = ?4 AND coll = ?5 AND rate_bps = ?6 AND haircut_bps = ?7
+           AND open_ts = ?8 AND maturity_ts = ?9
+           AND borrower_nonce = ?10 AND lender_nonce = ?11",
+        params![
+            r.initiator,
+            r.borrower_pk_x,
+            r.lender_pk_x,
+            r.cash,
+            r.coll,
+            r.rate_bps as i64,
+            r.haircut_bps as i64,
+            r.open_ts as i64,
+            r.maturity_ts as i64,
+            r.borrower_nonce as i64,
+            r.lender_nonce as i64,
+        ],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+pub fn intents_count_open(conn: &Connection) -> DbResult<u64> {
+    conn.query_row("SELECT COUNT(*) FROM intents WHERE status = 'open'", [], |r| {
+        r.get::<_, i64>(0).map(|n| n as u64)
+    })
+}
+
+pub fn intents_count_open_by_initiator(conn: &Connection, pk_x: &str) -> DbResult<u64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM intents WHERE status = 'open' AND
+           ((initiator = 'borrower' AND borrower_pk_x = ?1) OR
+            (initiator = 'lender' AND lender_pk_x = ?1))",
+        [pk_x],
+        |r| r.get::<_, i64>(0).map(|n| n as u64),
+    )
+}
+
+/// Drop open intents older than `ttl_secs` (their embedded nonces go stale
+/// quickly anyway); keeps the table and listings bounded (issue #20).
+pub fn intents_prune_expired(conn: &Connection, ttl_secs: u64) -> DbResult<usize> {
+    let n = conn.execute(
+        "DELETE FROM intents WHERE status = 'open' AND created_at < ?1",
+        [now() - ttl_secs as i64],
+    )?;
+    Ok(n)
 }
 
 #[derive(Debug, Clone)]
