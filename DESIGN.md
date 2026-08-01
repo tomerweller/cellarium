@@ -252,9 +252,15 @@ cadence — prover hardware is provisioned such that bb prove(batch_repo)
 
 ## Validium trust model
 
-Validity is trustless (every root advance is proven; PLAN §3's invariants —
-bilateral opens, borrower-only closes, condition-gated defaults/liquidations,
-exact interest, per-asset conservation — are all circuit-enforced). Data
+Every root advance is proven; PLAN §3's invariants — bilateral opens,
+borrower-only closes, condition-gated defaults/liquidations, exact interest,
+per-asset conservation — are all circuit-enforced. Batch submission is
+operator-only: `__constructor` pins the sequencer address and `submit_batch`
+rejects anyone else (issue #1 H1 — without in-circuit `pk_x` uniqueness, a
+permissionless prover could initialize a duplicate slot for a victim's key
+from the public deposit queue and replay the victim's published nonce-0
+signatures against it; the deposit fold does not bind the slot index). State
+validity is trustless within that single-operator model. Data
 availability is trusted to the sequencer operator: if the operator withholds
 a blob, users cannot recompute Merkle paths for newer roots and the system
 freezes (funds cannot be stolen). The mock oracle is admin-set: margining is
@@ -267,9 +273,17 @@ unauthenticated (PLAN 6.2). Production hardening path: DAC signatures over
 Tracked for REPORT.md: forced exits / censorship resistance; DA committee
 over `da_commitment`; circuit-level `pk_x` uniqueness (honest builder +
 harness enforce find-first; a malicious prover could still open a second slot
-with the same `pk_x` without a sparse/nullifier tree); VK rotation/upgrade
+with the same `pk_x` without a sparse/nullifier tree — mitigated for now by
+the operator-only submit gate, issue #1 H1); VK rotation/upgrade
 path; sequencer decentralization; SAC clawback/auth-flag vetting for the
 custody asset (including that it cannot mint past `u64::MAX` base units —
 the balance-overflow safety argument depends on it); cross-instance proof
 replay (no `addr_f` binding — old_root match makes replay a non-issue within
-an instance).
+an instance); deposit-queue capacity jam (issue #1 M5: accounts are never
+evicted, so a deposit to a fresh `pk_x` with the 256-slot tree full is
+unconsumable and blocks the mandatory FIFO prefix behind it forever — L1
+funds sit in the contract with no refund/cancel path; production needs
+deposit gating, a timeout refund, or zero-balance eviction); witness privacy
+against proof-observers (issue #1 M6: the pinned proof flavor is non-ZK, so
+"cannot see sizes/rates" is heuristic for anyone holding the proof bytes —
+measure `bb prove --zk` cost if a cryptographic guarantee is needed).

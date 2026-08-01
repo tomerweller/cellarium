@@ -208,6 +208,9 @@ pub enum OpenError {
     BadSignature { open_index: usize, role: &'static str },
     ZeroAmount { open_index: usize },
     BadTerms { open_index: usize },
+    /// open_ts postdates the batch (issue #1 M4): the circuit rejects it, and
+    /// letting it through would make the close unprovable until maturity.
+    FutureOpenTs { open_index: usize },
     Undercollateralized { open_index: usize },
     PositionsFull { open_index: usize },
     ReservedPaddingPk { open_index: usize },
@@ -303,6 +306,10 @@ fn apply_open(
     // (coll * price * 1e4 >= cash * (1e4 + haircut) * 1e7, PLAN.md 6.1.1).
     if p.maturity_ts <= batch_ts {
         return Err(OpenError::BadTerms { open_index: i });
+    }
+    // Issue #1 M4: mirrors the circuit's open_ts <= batch_ts constraint.
+    if p.open_ts > batch_ts {
+        return Err(OpenError::FutureOpenTs { open_index: i });
     }
     let coll_value = (p.coll as u128) * (price as u128) * 10_000;
     let required = (p.cash as u128) * (10_000 + p.haircut_bps as u128) * 10_000_000;
@@ -678,7 +685,7 @@ mod tests {
             .unwrap();
         assert_eq!(totals(&state), before, "close must conserve both assets");
         assert!(state.positions.slots.is_empty());
-        let intr = crate::settle::interest(5_000_000, 430, 21_590);
+        let intr = crate::settle::interest(5_000_000, 430, 21_590).unwrap();
         assert_eq!(state.accounts.get(0).unwrap().cash, 50_000_000 + intr);
 
         // Batch 3: re-open into the FREED slot, then let it default.

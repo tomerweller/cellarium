@@ -11,6 +11,10 @@ pub enum DataKey {
     Token(u32),
     /// Mock price oracle contract (PLAN.md 1.6).
     Oracle,
+    /// The sole address allowed to submit batches (single-operator trust
+    /// model; issue #1 H1 — permissionless proving enables cross-slot
+    /// signature replay while pk_x uniqueness is not enforced in-circuit).
+    Operator,
     Vk,
     Root,
     BatchNum,
@@ -34,6 +38,14 @@ pub fn set_token(env: &Env, asset: u32, token: &Address) {
 
 pub fn get_token(env: &Env, asset: u32) -> Address {
     env.storage().instance().get(&DataKey::Token(asset)).unwrap()
+}
+
+pub fn set_operator(env: &Env, operator: &Address) {
+    env.storage().instance().set(&DataKey::Operator, operator);
+}
+
+pub fn get_operator(env: &Env) -> Address {
+    env.storage().instance().get(&DataKey::Operator).unwrap()
 }
 
 pub fn set_oracle(env: &Env, oracle: &Address) {

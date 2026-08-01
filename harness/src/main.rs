@@ -38,7 +38,7 @@ fn main() {
             let cash: u64 = std::env::args().nth(2).unwrap().parse().unwrap();
             let rate: u32 = std::env::args().nth(3).unwrap().parse().unwrap();
             let elapsed: u64 = std::env::args().nth(4).unwrap().parse().unwrap();
-            println!("{}", harness::settle::interest(cash, rate, elapsed));
+            println!("{}", harness::settle::interest(cash, rate, elapsed).expect("interest overflow"));
         }
         // Deterministic repo demo batch -> Prover.toml -> bb -> fixtures/batch_repo.
         "demo-repo-batch" => demo_repo_batch(),
@@ -508,9 +508,9 @@ fn vectors_json() {
             "close_msg_slot0_n1": to_hex(&demo_close_msg),
         },
         "interest_vectors": [
-            { "cash": "1000000", "rate_bps": 430, "elapsed": 0, "interest": harness::settle::interest(1_000_000, 430, 0).to_string() },
-            { "cash": "100000000000000", "rate_bps": 430, "elapsed": 86400, "interest": harness::settle::interest(100_000_000_000_000, 430, 86_400).to_string() },
-            { "cash": "1000000000", "rate_bps": 1250, "elapsed": 31536000, "interest": harness::settle::interest(1_000_000_000, 1250, 31_536_000).to_string() },
+            { "cash": "1000000", "rate_bps": 430, "elapsed": 0, "interest": harness::settle::interest(1_000_000, 430, 0).unwrap().to_string() },
+            { "cash": "100000000000000", "rate_bps": 430, "elapsed": 86400, "interest": harness::settle::interest(100_000_000_000_000, 430, 86_400).unwrap().to_string() },
+            { "cash": "1000000000", "rate_bps": 1250, "elapsed": 31536000, "interest": harness::settle::interest(1_000_000_000, 1250, 31_536_000).unwrap().to_string() },
         ],
         "pad": {
             "pk_x": to_hex(&pad_kp.pk_x()),

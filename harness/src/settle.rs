@@ -13,16 +13,18 @@ use crate::tree::{Account, DEPTH};
 pub const INTEREST_DENOM: u128 = 311_040_000_000;
 
 /// interest = floor(cash * rate_bps * elapsed / DENOM) in u128 (fits: u64 *
-/// u32 * u64 < 2^160 needs u128 care — cap via checked math; realistic values
-/// are far smaller). Mirrors the circuit's floor-division constraint.
-pub fn interest(cash: u64, rate_bps: u32, elapsed_secs: u64) -> u64 {
+/// u32 * u64 < 2^160 needs u128 care — checked math; realistic values are
+/// far smaller). Mirrors the circuit's floor-division constraint. `None` on
+/// u128 product overflow or an interest above u64 — such terms are
+/// unprovable anyway (the circuit's assert_u64 on interest fails), and a
+/// panic here would kill the engine thread (issue #1 L7).
+pub fn interest(cash: u64, rate_bps: u32, elapsed_secs: u64) -> Option<u64> {
     // cash * rate <= 2^64 * 2^32 = 2^96; * elapsed can exceed u128 only for
     // absurd elapsed (< 2^32 secs = 136 years is safe: 96+32 = 128).
     let product = (cash as u128)
-        .checked_mul(rate_bps as u128)
-        .and_then(|p| p.checked_mul(elapsed_secs as u128))
-        .expect("interest product overflow (elapsed too large)");
-    u64::try_from(product / INTEREST_DENOM).expect("interest exceeds u64")
+        .checked_mul(rate_bps as u128)?
+        .checked_mul(elapsed_secs as u128)?;
+    u64::try_from(product / INTEREST_DENOM).ok()
 }
 
 /// The close signing message: P2([DOMAIN_CLOSE, pos_index, pos_leaf, nonce]).
@@ -114,6 +116,12 @@ pub enum SettleError {
     MarginHealthy { index: usize },
     InsufficientCash { index: usize, available: u64, needed: u64 },
     BalanceOverflow { index: usize },
+    /// The position's open_ts postdates batch_ts (issue #1 M4): elapsed
+    /// would underflow and the close is unprovable in-circuit.
+    FutureOpenTs { index: usize },
+    /// cash * rate * elapsed overflows or interest exceeds u64 (issue #1
+    /// L7): unprovable terms; must not panic the engine thread.
+    InterestOverflow { index: usize },
 }
 
 impl std::fmt::Display for SettleError {
@@ -165,8 +173,14 @@ pub fn apply_close(
         return Err(SettleError::BadSignature { index: i });
     }
 
-    let elapsed = batch_ts.saturating_sub(position.open_ts);
-    let intr = interest(position.cash, position.rate_bps, elapsed);
+    // Circuit mirror (issue #1 M4): elapsed = batch_ts - open_ts must not
+    // underflow; settle.nr's assert_u64(elapsed) makes such a close
+    // unprovable, so building it would only burn a prove cycle.
+    let elapsed = batch_ts
+        .checked_sub(position.open_ts)
+        .ok_or(SettleError::FutureOpenTs { index: i })?;
+    let intr = interest(position.cash, position.rate_bps, elapsed)
+        .ok_or(SettleError::InterestOverflow { index: i })?;
     let repay = position
         .cash
         .checked_add(intr)

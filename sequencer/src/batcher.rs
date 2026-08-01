@@ -9,7 +9,9 @@
 
 use crate::config::Config;
 use crate::engine::{ApiError, BatchJob, Command};
+use crate::hexutil::fr_hex;
 use crate::stellar::StellarClient;
+use harness::poseidon::Fr;
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -33,9 +35,9 @@ pub async fn run(
     cfg: Config,
 ) {
     // Resume any batch left mid-pipeline by a crash before the normal loop.
-    if let Some((batch_num, status, batch_ts)) = inflight(&engine).await {
+    if let Some((batch_num, status, batch_ts, new_root)) = inflight(&engine).await {
         tracing::info!(batch_num, %status, "resuming inflight batch on boot");
-        resume(&engine, &client, &cfg, batch_num, &status, batch_ts).await;
+        resume(&engine, &client, &cfg, batch_num, &status, batch_ts, new_root).await;
     }
 
     let mut interval = tokio::time::interval(Duration::from_secs(cfg.tick_secs));
@@ -45,26 +47,26 @@ pub async fn run(
         // Self-heal a wedged inflight batch (e.g. submission kept failing
         // until its timestamp window lapsed): confirm it if it actually
         // landed, otherwise fail + requeue so a fresh batch can build.
-        if let Some((batch_num, status, batch_ts)) = inflight(&engine).await {
+        if let Some((batch_num, status, batch_ts, new_root)) = inflight(&engine).await {
             if matches!(status.as_str(), "proved" | "submitting" | "submitted")
                 && now_secs().saturating_sub(batch_ts) > TS_WINDOW_LAPSED_SECS
             {
-                let c = client.clone();
-                let landed = tokio::task::spawn_blocking(move || c.batch_num())
-                    .await
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .map(|bn| bn >= batch_num)
-                    .unwrap_or(false);
-                if landed {
-                    let _ = ask(&engine, |r| Command::ConfirmBatch(batch_num, r)).await;
-                } else {
-                    tracing::warn!(
-                        batch_num,
-                        batch_ts,
-                        "inflight batch's timestamp window lapsed; rebuilding"
-                    );
-                    fail(&engine, batch_num, "timestamp window lapsed").await;
+                match landed(&client, batch_num, &new_root).await {
+                    Some(Landed::Ours) => {
+                        let _ = ask(&engine, |r| Command::ConfirmBatch(batch_num, r)).await;
+                    }
+                    Some(Landed::Foreign(chain_root)) => {
+                        halt_on_foreign_root(batch_num, &new_root, &chain_root);
+                    }
+                    Some(Landed::No) => {
+                        tracing::warn!(
+                            batch_num,
+                            batch_ts,
+                            "inflight batch's timestamp window lapsed; rebuilding"
+                        );
+                        fail(&engine, batch_num, "timestamp window lapsed").await;
+                    }
+                    None => {} // chain unreachable; try again next tick
                 }
             }
         }
@@ -152,7 +154,7 @@ async fn run_pipeline(
         }
     };
 
-    submit_and_confirm(engine, client, cfg, batch_num, envelope_json).await;
+    submit_and_confirm(engine, client, cfg, batch_num, job.new_root, envelope_json).await;
 }
 
 async fn submit_and_confirm(
@@ -160,6 +162,7 @@ async fn submit_and_confirm(
     client: &Arc<dyn StellarClient>,
     cfg: &Config,
     batch_num: u64,
+    new_root: Fr,
     envelope_json: String,
 ) {
     // Mark submitting BEFORE the CLI call so a crash mid-send is detectable.
@@ -182,38 +185,81 @@ async fn submit_and_confirm(
         Err(e) => tracing::error!(batch_num, %e, "submit task panicked"),
     }
 
-    confirm(engine, client, cfg, batch_num).await;
+    confirm(engine, client, cfg, batch_num, new_root).await;
 }
 
-/// Poll the chain root until it equals this batch's new_root, then tell the
-/// engine to apply the batch. Bounded retries; on timeout the batch stays
+/// Whether the chain has advanced to this batch, and if so whether the root
+/// it landed on is OURS. `None` means the chain was unreachable this attempt.
+enum Landed {
+    Ours,
+    /// Counter advanced but the root is not this batch's new_root: someone
+    /// else moved the state (issue #1 H2).
+    Foreign(Fr),
+    No,
+}
+
+async fn landed(
+    client: &Arc<dyn StellarClient>,
+    batch_num: u64,
+    new_root: &Fr,
+) -> Option<Landed> {
+    let c = client.clone();
+    let chain_bn = tokio::task::spawn_blocking(move || c.batch_num()).await.ok()?.ok()?;
+    if chain_bn < batch_num {
+        return Some(Landed::No);
+    }
+    let c = client.clone();
+    let chain_root = tokio::task::spawn_blocking(move || c.root()).await.ok()?.ok()?;
+    if chain_root == *new_root {
+        Some(Landed::Ours)
+    } else {
+        Some(Landed::Foreign(chain_root))
+    }
+}
+
+/// A foreign batch advanced the chain: confirming ours would diverge local
+/// state from the chain, and every future proof (bound to our stale
+/// old_root) would fail verification anyway. Halt loudly; boot
+/// reconciliation refuses to run until the operator sorts out who else is
+/// submitting (should be impossible with the operator pinned on-chain).
+fn halt_on_foreign_root(batch_num: u64, new_root: &Fr, chain_root: &Fr) -> ! {
+    tracing::error!(
+        batch_num,
+        expected_root = %fr_hex(new_root),
+        chain_root = %fr_hex(chain_root),
+        "chain advanced to a root we did not produce; refusing to confirm — halting"
+    );
+    std::process::exit(1);
+}
+
+/// Poll the chain until its ROOT equals this batch's new_root (the counter
+/// alone is not proof our batch landed — issue #1 H2), then tell the engine
+/// to apply the batch. Bounded retries; on timeout the batch stays
 /// 'submitted' and boot recovery re-checks it.
 async fn confirm(
     engine: &mpsc::Sender<Command>,
     client: &Arc<dyn StellarClient>,
     cfg: &Config,
     batch_num: u64,
+    new_root: Fr,
 ) {
     for attempt in 0..30u32 {
         tokio::time::sleep(Duration::from_secs(cfg.tick_secs)).await;
-        let c = client.clone();
-        let chain_bn = match tokio::task::spawn_blocking(move || c.batch_num()).await {
-            Ok(Ok(bn)) => bn,
-            _ => continue,
-        };
-        if chain_bn >= batch_num {
-            match ask(engine, |r| Command::ConfirmBatch(batch_num, r)).await {
-                Ok(()) => {
-                    tracing::info!(batch_num, "batch confirmed on chain");
-                    return;
+        match landed(client, batch_num, &new_root).await {
+            Some(Landed::Ours) => {
+                match ask(engine, |r| Command::ConfirmBatch(batch_num, r)).await {
+                    Ok(()) => tracing::info!(batch_num, "batch confirmed on chain"),
+                    Err(e) => tracing::error!(batch_num, %e, "confirm apply failed"),
                 }
-                Err(e) => {
-                    tracing::error!(batch_num, %e, "confirm apply failed");
-                    return;
-                }
+                return;
+            }
+            Some(Landed::Foreign(chain_root)) => {
+                halt_on_foreign_root(batch_num, &new_root, &chain_root);
+            }
+            Some(Landed::No) | None => {
+                tracing::debug!(batch_num, attempt, "awaiting confirmation");
             }
         }
-        tracing::debug!(batch_num, attempt, chain_bn, "awaiting confirmation");
     }
     tracing::warn!(batch_num, "confirmation timed out; boot recovery will re-check");
 }
@@ -225,6 +271,7 @@ async fn resume(
     batch_num: u64,
     status: &str,
     batch_ts: u64,
+    new_root: Fr,
 ) {
     match status {
         // Proof exists; re-submitting is safe (proof binds old_root, a
@@ -234,18 +281,17 @@ async fn resume(
         "proved" | "submitting" | "submitted"
             if now_secs().saturating_sub(batch_ts) > TS_WINDOW_LAPSED_SECS =>
         {
-            let c = client.clone();
-            let landed = tokio::task::spawn_blocking(move || c.batch_num())
-                .await
-                .ok()
-                .and_then(|r| r.ok())
-                .map(|bn| bn >= batch_num)
-                .unwrap_or(false);
-            if landed {
-                let _ = ask(engine, |r| Command::ConfirmBatch(batch_num, r)).await;
-            } else {
-                tracing::warn!(batch_num, batch_ts, "resume: timestamp window lapsed; rebuilding");
-                fail(engine, batch_num, "timestamp window lapsed").await;
+            match landed(client, batch_num, &new_root).await {
+                Some(Landed::Ours) => {
+                    let _ = ask(engine, |r| Command::ConfirmBatch(batch_num, r)).await;
+                }
+                Some(Landed::Foreign(chain_root)) => {
+                    halt_on_foreign_root(batch_num, &new_root, &chain_root);
+                }
+                Some(Landed::No) | None => {
+                    tracing::warn!(batch_num, batch_ts, "resume: timestamp window lapsed; rebuilding");
+                    fail(engine, batch_num, "timestamp window lapsed").await;
+                }
             }
         }
         "proved" | "submitting" | "submitted" => {
@@ -256,7 +302,7 @@ async fn resume(
                     return;
                 }
             };
-            submit_and_confirm(engine, client, cfg, batch_num, envelope).await;
+            submit_and_confirm(engine, client, cfg, batch_num, new_root, envelope).await;
         }
         other => {
             // 'proving' and anything else pre-proof: the prove artifacts are
@@ -269,7 +315,7 @@ async fn resume(
 
 // ---- engine command helpers ----
 
-async fn inflight(engine: &mpsc::Sender<Command>) -> Option<(u64, String, u64)> {
+async fn inflight(engine: &mpsc::Sender<Command>) -> Option<(u64, String, u64, Fr)> {
     let (tx, rx) = oneshot::channel();
     engine.send(Command::GetInflight(tx)).ok()?;
     rx.await.ok().flatten()

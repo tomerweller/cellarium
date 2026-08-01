@@ -80,6 +80,14 @@ fn open_signature_binds_terms() {
     let _ = apply_open(acct_root, pos_root, 0, 1700000100, 250000000, w);
 }
 
+#[test(should_fail)]
+fn open_rejects_future_open_ts() {
+    // Issue #1 M4: a signed open_ts > batch_ts would make the position's
+    // close unprovable (elapsed underflows in settle.nr) until maturity.
+    let (acct_root, pos_root, w) = repo_vectors::open_future_ts();
+    let _ = apply_open(acct_root, pos_root, 0, 1700000100, 250000000, w);
+}
+
 // --- Inactive entries are identities ----------------------------------------
 
 #[test]

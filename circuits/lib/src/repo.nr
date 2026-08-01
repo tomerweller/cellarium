@@ -176,6 +176,10 @@ pub fn apply_open(
         assert_u64(o.maturity_ts - 1 - o.open_ts); // maturity_ts > open_ts
         // M3: cannot open a repo that is already past maturity.
         assert_u64(o.maturity_ts - 1 - batch_ts); // maturity_ts > batch_ts
+        // Issue #1 M4: open_ts may not postdate the batch. Otherwise the
+        // close-side elapsed = batch_ts - open_ts (settle.nr) underflows and
+        // the position is unprovable (hence unclosable) until maturity.
+        assert_u64(batch_ts - o.open_ts); // open_ts <= batch_ts
         // M4: open-time collateral adequacy at the batch price. price is a
         // u64-bounded public input (contract enforces < 2^64), so both sides
         // fit 2^144 and the difference range check is sound.

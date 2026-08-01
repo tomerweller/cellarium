@@ -406,6 +406,27 @@ pub fn emit() -> String {
         .unwrap();
     }
 
+    // (5b) Future-dated open_ts (issue #1 M4): both signatures valid over the
+    // future terms, adequacy holds, maturity > both timestamps — only the
+    // open_ts <= batch_ts guard rejects (batch_ts in tests is 1700000100).
+    {
+        let state = funded_state();
+        let mut p = demo_position(&borrower, &lender);
+        p.open_ts = 1_700_000_200;
+        let req = signed_open(&hasher, &p, &borrower, &lender, 0, 0, 3551, 3552);
+        let e = manual_entry(&state, &p, &req, 0, FR_ZERO);
+        writeln!(out, "/// Open whose signed open_ts postdates the batch (issue #1 M4): only the").unwrap();
+        writeln!(out, "/// open_ts <= batch_ts guard rejects (else the close-side elapsed underflows).").unwrap();
+        writeln!(
+            out,
+            "pub fn open_future_ts() -> (Field, Field, OpenWitness) {{\n    let w = {};\n    ({}, {}, w)\n}}\n",
+            open_lit(&e),
+            to_hex(&state.accounts.root(&hasher)),
+            to_hex(&state.positions.root(&hasher)),
+        )
+        .unwrap();
+    }
+
     // (6) Inactive (padding) open over a state with one live position:
     // identity on both trees.
     {
@@ -539,7 +560,7 @@ pub fn emit_settle() -> String {
         let entry = crate::settle::apply_close(&hasher, &mut probe, 0, &close_req(4201), 1_700_086_400, &mut da)
             .expect("close at maturity applies");
         let mut entry_late = entry.clone();
-        entry_late.interest = interest(1_000_000, 430, ts - 1_700_000_000);
+        entry_late.interest = interest(1_000_000, 430, ts - 1_700_000_000).unwrap();
         let state = base_state();
         writeln!(out, "/// Close presented PAST maturity (interest consistent for the late ts,").unwrap();
         writeln!(out, "/// signature valid): only batch_ts <= maturity_ts rejects. NOTE: the").unwrap();
@@ -780,7 +801,7 @@ pub fn emit_settle() -> String {
         writeln!(out, "pub fn interest_vectors() -> [(Field, Field, Field, Field); {}] {{", cases.len()).unwrap();
         let lits: Vec<String> = cases
             .iter()
-            .map(|(c, r, e)| format!("({}, {}, {}, {})", c, r, e, interest(*c, *r, *e)))
+            .map(|(c, r, e)| format!("({}, {}, {}, {})", c, r, e, interest(*c, *r, *e).unwrap()))
             .collect();
         writeln!(out, "    [{}]", lits.join(", ")).unwrap();
         writeln!(out, "}}").unwrap();

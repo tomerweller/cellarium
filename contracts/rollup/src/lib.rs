@@ -65,6 +65,8 @@ pub enum RollupError {
     BadTimestamp = 11,
     /// Oracle has no price or it is older than MAX_PRICE_AGE_SECS.
     StalePrice = 12,
+    /// submit_batch caller is not the pinned operator (issue #1 H1).
+    NotOperator = 13,
 }
 
 /// Mirror of the oracle's PriceData (contracts/oracle); field names must
@@ -121,6 +123,7 @@ impl RollupContract {
         token_cash: Address,
         token_coll: Address,
         oracle: Address,
+        operator: Address,
         vk: Bytes,
         genesis_root: BytesN<32>,
     ) -> Result<(), RollupError> {
@@ -132,6 +135,7 @@ impl RollupContract {
         storage::set_token(&env, ASSET_CASH, &token_cash);
         storage::set_token(&env, ASSET_COLL, &token_coll);
         storage::set_oracle(&env, &oracle);
+        storage::set_operator(&env, &operator);
         storage::set_root(&env, &genesis_root);
         Ok(())
     }
@@ -176,12 +180,21 @@ impl RollupContract {
     /// Verify a batch proof against the current root and the FIFO prefixes of
     /// both deposit queues; on success advance the root, release the consumed
     /// deposits, and pay out the batch's withdrawals.
+    ///
+    /// Operator-only (issue #1 H1): while the circuit does not enforce pk_x
+    /// uniqueness across account slots, a permissionless prover could route
+    /// a queued deposit to a duplicate slot and replay the victim's published
+    /// nonce-0 signatures against it. Pinning the submitter restores the
+    /// documented single-operator trust model.
     pub fn submit_batch(
         env: Env,
         sequencer: Address,
         envelope: BatchEnvelope,
     ) -> Result<(), RollupError> {
         sequencer.require_auth();
+        if sequencer != storage::get_operator(&env) {
+            return Err(RollupError::NotOperator);
+        }
 
         if envelope.proof.len() as usize != PROOF_BYTES {
             return Err(RollupError::InvalidProofLength);

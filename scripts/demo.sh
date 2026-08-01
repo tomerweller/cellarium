@@ -50,7 +50,7 @@ VK=$(xxd -p fixtures/batch_repo/vk.bin | tr -d '\n')
 GENESIS=$(cargo run -q -p sequencer -- genesis-root); GENESIS=${GENESIS#0x}
 ROLLUP=$(stellar contract deploy --wasm target/wasm32v1-none/release/rollup.wasm \
   --source "$IDENTITY" --network testnet -- --token_cash "$TOKEN" --token_coll "$TUST" \
-  --oracle "$ORACLE" --vk "$VK" --genesis_root "$GENESIS" 2>/dev/null)
+  --oracle "$ORACLE" --operator "$SEQ_ADDR" --vk "$VK" --genesis_root "$GENESIS" 2>/dev/null)
 note "rollup   $ROLLUP"
 note "tUST     $TUST"
 note "oracle   $ORACLE  (1 tUST = 25 XLM)"

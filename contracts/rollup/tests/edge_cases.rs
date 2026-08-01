@@ -1,6 +1,6 @@
 //! submit_batch edge cases the custody-loop suite doesn't reach:
 //! withdrawal-list bounds, multi-batch FIFO queue progression (per asset),
-//! and the (intentional) permissionless-submit property. All envelope
+//! and the operator-only submit gate (issue #1 H1). All envelope
 //! validation under test happens before proof verification, so a
 //! fixture-length proof is enough for the rejects; the queue-progression
 //! test lands the real fixture proof.
@@ -29,6 +29,7 @@ struct Setup<'a> {
     env: Env,
     rollup: RollupContractClient<'a>,
     funder: Address,
+    operator: Address,
     meta: serde_json::Value,
     batch_ts: u64,
 }
@@ -55,12 +56,13 @@ fn setup() -> Setup<'static> {
 
     let vk = Bytes::from_slice(&env, VK);
     let genesis = BytesN::from_array(&env, &hex32(meta["old_state_root"].as_str().unwrap()));
+    let operator = Address::generate(&env);
     let rollup_id = env.register(
         RollupContract,
-        (cash_sac.address(), coll_sac.address(), oracle_id, vk, genesis),
+        (cash_sac.address(), coll_sac.address(), oracle_id, operator.clone(), vk, genesis),
     );
     let rollup = RollupContractClient::new(&env, &rollup_id);
-    Setup { env: env.clone(), rollup, funder, meta, batch_ts }
+    Setup { env: env.clone(), rollup, funder, operator, meta, batch_ts }
 }
 
 fn envelope_with_withdrawals(s: &Setup, wds: Vec<Withdrawal>) -> BatchEnvelope {
@@ -82,14 +84,14 @@ fn nine_withdrawals_rejected() {
     for _ in 0..9 {
         wds.push_back(Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: 1 });
     }
-    let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope_with_withdrawals(&s, wds));
+    let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
     assert_eq!(r, Err(Ok(RollupError::TooManyWithdrawals)));
     // Exactly 8 passes the bound (and then fails later, at verification).
     let mut wds = vec![&s.env];
     for _ in 0..8 {
         wds.push_back(Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: 1 });
     }
-    let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope_with_withdrawals(&s, wds));
+    let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
     assert_eq!(r, Err(Ok(RollupError::VerificationFailed)));
 }
 
@@ -101,7 +103,7 @@ fn withdrawal_amount_bounds() {
             &s.env,
             Withdrawal { dest: Address::generate(&s.env), asset: ASSET_CASH, amount: bad },
         ];
-        let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope_with_withdrawals(&s, wds));
+        let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
         assert_eq!(r, Err(Ok(RollupError::InvalidAmount)), "amount {bad} must be rejected");
     }
 }
@@ -113,7 +115,7 @@ fn withdrawal_asset_bounds() {
         &s.env,
         Withdrawal { dest: Address::generate(&s.env), asset: 2, amount: 1 },
     ];
-    let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope_with_withdrawals(&s, wds));
+    let r = s.rollup.try_submit_batch(&s.operator, &envelope_with_withdrawals(&s, wds));
     assert_eq!(r, Err(Ok(RollupError::InvalidAsset)));
 }
 
@@ -161,7 +163,7 @@ fn partial_queue_consumption_across_batches() {
 
     let envelope = fixture_envelope(&s);
     s.env.cost_estimate().budget().reset_unlimited();
-    s.rollup.submit_batch(&Address::generate(&s.env), &envelope);
+    s.rollup.submit_batch(&s.operator, &envelope);
 
     assert_eq!((s.rollup.dep_head(&ASSET_CASH), s.rollup.dep_tail(&ASSET_CASH)), (1, 2));
     assert_eq!((s.rollup.dep_head(&ASSET_COLL), s.rollup.dep_tail(&ASSET_COLL)), (1, 1));
@@ -171,12 +173,14 @@ fn partial_queue_consumption_across_batches() {
     assert_eq!(s.rollup.batch_num(), 1);
 }
 
-/// Submission is intentionally permissionless: the proof binds old_root and
-/// the contract recomputes the deposit/withdraw folds itself, so a valid
-/// envelope is valid no matter who relays it. This test documents that as a
-/// design decision (any address, no registered-sequencer check).
+/// Submission is operator-only (issue #1 H1): without in-circuit pk_x
+/// uniqueness, a permissionless prover could route a queued deposit to a
+/// duplicate slot and replay the victim's published signatures against it.
+/// A valid envelope from anyone but the pinned operator must be rejected
+/// before any other validation, and the same envelope must land when the
+/// operator submits it.
 #[test]
-fn submit_is_permissionless_by_design() {
+fn submit_requires_pinned_operator() {
     let s = setup();
     let alice_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][0]["pk_x"].as_str().unwrap()));
     let bob_pk = BytesN::from_array(&s.env, &hex32(s.meta["deposits"][1]["pk_x"].as_str().unwrap()));
@@ -186,6 +190,10 @@ fn submit_is_permissionless_by_design() {
     let envelope = fixture_envelope(&s);
     let random_third_party = Address::generate(&s.env);
     s.env.cost_estimate().budget().reset_unlimited();
-    s.rollup.submit_batch(&random_third_party, &envelope);
+    let r = s.rollup.try_submit_batch(&random_third_party, &envelope);
+    assert_eq!(r, Err(Ok(RollupError::NotOperator)));
+    assert_eq!(s.rollup.batch_num(), 0);
+
+    s.rollup.submit_batch(&s.operator, &envelope);
     assert_eq!(s.rollup.batch_num(), 1);
 }

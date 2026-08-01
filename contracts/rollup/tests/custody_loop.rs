@@ -36,6 +36,7 @@ struct Setup<'a> {
     coll: token::TokenClient<'a>,
     alice_l1: Address,
     bob_l1: Address,
+    operator: Address,
     meta: serde_json::Value,
 }
 
@@ -68,9 +69,10 @@ fn setup() -> Setup<'static> {
 
     let vk = Bytes::from_slice(&env, VK);
     let genesis = BytesN::from_array(&env, &hex32(meta["old_state_root"].as_str().unwrap()));
+    let operator = Address::generate(&env);
     let rollup_id = env.register(
         RollupContract,
-        (cash_sac.address(), coll_sac.address(), oracle_id, vk, genesis),
+        (cash_sac.address(), coll_sac.address(), oracle_id, operator.clone(), vk, genesis),
     );
     let rollup = RollupContractClient::new(&env, &rollup_id);
 
@@ -82,6 +84,7 @@ fn setup() -> Setup<'static> {
         coll: token::TokenClient::new(&env, &coll_sac.address()),
         alice_l1,
         bob_l1,
+        operator,
         meta,
     }
 }
@@ -124,7 +127,7 @@ fn full_repo_loop() {
     assert_eq!(s.coll.balance(&rollup_addr), 5_000_000);
 
     let envelope = fixture_envelope(&s.env, &s.meta);
-    let sequencer = Address::generate(&s.env);
+    let sequencer = s.operator.clone();
     s.env.cost_estimate().budget().reset_unlimited();
     s.rollup.submit_batch(&sequencer, &envelope);
     println!(
@@ -180,7 +183,7 @@ fn tampered_da_commitment_fails() {
     let mut tampered = hex32(s.meta["da_commitment"].as_str().unwrap());
     tampered[31] ^= 0x01;
     envelope.da_commitment = BytesN::from_array(&s.env, &tampered);
-    assert!(s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope).is_err());
+    assert!(s.rollup.try_submit_batch(&s.operator, &envelope).is_err());
 }
 
 #[test]
@@ -191,7 +194,7 @@ fn wrong_new_root_fails() {
     let mut tampered = hex32(s.meta["new_state_root"].as_str().unwrap());
     tampered[31] ^= 0x01;
     envelope.new_root = BytesN::from_array(&s.env, &tampered);
-    assert!(s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope).is_err());
+    assert!(s.rollup.try_submit_batch(&s.operator, &envelope).is_err());
 }
 
 #[test]
@@ -202,7 +205,7 @@ fn wrong_batch_ts_fails_verification() {
     do_deposits(&s);
     let mut envelope = fixture_envelope(&s.env, &s.meta);
     envelope.batch_ts += 1; // still within [ledger-60, ledger]
-    assert!(s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope).is_err());
+    assert!(s.rollup.try_submit_batch(&s.operator, &envelope).is_err());
 }
 
 #[test]
@@ -214,13 +217,13 @@ fn future_or_lagging_batch_ts_rejected() {
     // Future-dated claimed ts: rejected before verification.
     let mut envelope = fixture_envelope(&s.env, &s.meta);
     envelope.batch_ts = ledger_ts + 1;
-    let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope);
+    let r = s.rollup.try_submit_batch(&s.operator, &envelope);
     assert_eq!(r, Err(Ok(RollupError::BadTimestamp)));
 
     // Lag beyond the 60s window: advance the ledger far past the claim.
     s.env.ledger().with_mut(|l| l.timestamp = ledger_ts + 3600);
     let envelope = fixture_envelope(&s.env, &s.meta);
-    let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope);
+    let r = s.rollup.try_submit_batch(&s.operator, &envelope);
     assert_eq!(r, Err(Ok(RollupError::BadTimestamp)));
 }
 
@@ -236,7 +239,7 @@ fn stale_price_rejected() {
     s.env.ledger().with_mut(|l| l.timestamp = now);
     let mut envelope = fixture_envelope(&s.env, &s.meta);
     envelope.batch_ts = now - 1;
-    let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope);
+    let r = s.rollup.try_submit_batch(&s.operator, &envelope);
     assert_eq!(r, Err(Ok(RollupError::StalePrice)));
 }
 
@@ -248,7 +251,7 @@ fn wrong_price_fails_verification() {
     do_deposits(&s);
     s.oracle.set_price(&999_999_999i128);
     let envelope = fixture_envelope(&s.env, &s.meta);
-    let r = s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope);
+    let r = s.rollup.try_submit_batch(&s.operator, &envelope);
     assert_eq!(r, Err(Ok(RollupError::VerificationFailed)));
 }
 
@@ -256,7 +259,7 @@ fn wrong_price_fails_verification() {
 fn reasseted_or_tampered_withdrawal_fails() {
     let s = setup();
     do_deposits(&s);
-    let sequencer = Address::generate(&s.env);
+    let sequencer = s.operator.clone();
 
     // Wrong asset (cash pool instead of coll).
     let mut envelope = fixture_envelope(&s.env, &s.meta);
@@ -286,7 +289,7 @@ fn reasseted_or_tampered_withdrawal_fails() {
 fn wrong_deposit_count_fails() {
     let s = setup();
     do_deposits(&s);
-    let sequencer = Address::generate(&s.env);
+    let sequencer = s.operator.clone();
     let mut envelope = fixture_envelope(&s.env, &s.meta);
     envelope.deposit_count_cash = 0;
     assert!(s.rollup.try_submit_batch(&sequencer, &envelope).is_err());
@@ -298,7 +301,7 @@ fn wrong_deposit_count_fails() {
 fn missing_deposits_fail() {
     let s = setup();
     let envelope = fixture_envelope(&s.env, &s.meta);
-    assert!(s.rollup.try_submit_batch(&Address::generate(&s.env), &envelope).is_err());
+    assert!(s.rollup.try_submit_batch(&s.operator, &envelope).is_err());
 }
 
 #[test]

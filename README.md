@@ -102,6 +102,13 @@ application order). Intent listings are filtered to the named counterparty
 (unauthenticated — prototype caveat; the sequencer sees everything by
 construction).
 
+One caveat for proof-observers: the deployed flavor is **non-ZK** UltraHonk
+(DESIGN.md pins it for verification cost), which does not blind the witness.
+The privacy statements above are heuristic against someone holding the proof
+bytes themselves — extraction from a 2^17-row trace is unanalyzed, not
+cryptographically impossible. Enable `bb prove --zk` (and re-measure the
+on-chain budget) if zero-knowledge against proof-observers is required.
+
 ## Testing
 
 ```sh
@@ -126,18 +133,27 @@ layout drifts.
 
 ## Trust model & limitations
 
-Validity is **trustless** — every state transition is proven, so funds cannot
-be stolen: both signatures are required to open, only the borrower can close
-(and only before maturity), defaults/liquidations are valid only when their
-condition holds at the bound timestamp/price, and value is conserved per
-asset across accounts + positions + queues. Data availability is **trusted to
-the sequencer operator**: withheld blobs freeze the system (funds can't be
-stolen, but exits need the operator). The mock oracle is admin-set — margining
-is only as honest as its price feed.
+Every state transition is proven: both signatures are required to open, only
+the borrower can close (and only before maturity), defaults/liquidations are
+valid only when their condition holds at the bound timestamp/price, and value
+is conserved per asset across accounts + positions + queues. Batch submission
+is **operator-only** (the contract pins the sequencer address at deploy):
+the circuit does not enforce `pk_x` uniqueness across account slots, so a
+permissionless prover could otherwise route a queued deposit to a duplicate
+slot and replay published signatures against it (issue #1 H1). Within that
+single-operator model the proofs make state validity trustless; removing the
+operator pin safely requires an in-circuit uniqueness/nullifier tree. Data
+availability is **trusted to the sequencer operator**: withheld blobs freeze
+the system (funds can't be stolen, but exits need the operator). The mock
+oracle is admin-set — margining is only as honest as its price feed.
 
 Known deltas tracked for a production version (also in `DESIGN.md` /
 `PLAN.md` §4): single-operator sequencer, no forced exits, no DAC, no
 rehypothecation, full (not partial) liquidation with no margin top-up,
 immutable VK per instance, localStorage key custody, 256 accounts / 256
 open positions, unaudited verifier crate, and the 60s/5-min timestamp/price
-windows documented in DESIGN.md.
+windows documented in DESIGN.md. Also: accounts are never evicted, so a
+deposit to a fresh `pk_x` while the 256-slot tree is full can never be
+consumed and — the FIFO prefix being mandatory — blocks every deposit queued
+behind it, with no on-chain refund path (issue #1 M5); production needs
+deposit gating, a timeout refund entrypoint, or zero-balance eviction.

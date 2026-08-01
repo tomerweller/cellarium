@@ -24,6 +24,18 @@ use rusqlite::Connection;
 use std::sync::mpsc;
 use tokio::sync::oneshot;
 
+/// Max client clock skew tolerated on an intent's open_ts (issue #1 M4):
+/// the circuit requires open_ts <= batch_ts, and batch_ts is assigned at
+/// build time (>= admission time), so any open admitted under this bound
+/// becomes provable within one skew window. The builder defers opens up to
+/// 2x this bound instead of rejecting them.
+const OPEN_TS_SKEW_SECS: u64 = 60;
+
+/// Cap on signed rate/haircut bps at admission (issue #1 L7): 1e6 bps =
+/// 10,000%. Keeps cash * rate * elapsed < 2^128 for any elapsed < 136 years,
+/// so the interest mirror can never overflow for admitted terms.
+const MAX_TERM_BPS: u32 = 1_000_000;
+
 // ---------- wire/result types ----------
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -167,6 +179,9 @@ impl From<rusqlite::Error> for ApiError {
 #[derive(Debug)]
 pub struct BatchJob {
     pub batch_num: u64,
+    /// The proven post-state root; confirmation compares the CHAIN root
+    /// against this, never just the batch counter (issue #1 H2).
+    pub new_root: Fr,
     pub prover_toml: String,
 }
 
@@ -203,8 +218,9 @@ pub enum Command {
     ConfirmBatch(u64, oneshot::Sender<Result<(), ApiError>>),
     /// Batch failed pre-submission; requeue its inputs.
     FailBatch(u64, String, oneshot::Sender<Result<(), ApiError>>),
-    /// Resume state for the batcher after boot: (batch_num, status, batch_ts).
-    GetInflight(oneshot::Sender<Option<(u64, String, u64)>>),
+    /// Resume state for the batcher after boot:
+    /// (batch_num, status, batch_ts, new_root).
+    GetInflight(oneshot::Sender<Option<(u64, String, u64, Fr)>>),
 }
 
 pub struct Engine {
@@ -292,7 +308,7 @@ impl Engine {
                 let inflight = db::inflight_batch(&self.conn)
                     .ok()
                     .flatten()
-                    .map(|b| (b.batch_num, b.status, b.batch_ts));
+                    .map(|b| (b.batch_num, b.status, b.batch_ts, b.new_root));
                 let _ = reply.send(inflight);
             }
         }
@@ -541,6 +557,18 @@ impl Engine {
         }
         if position.maturity_ts <= position.open_ts {
             return Err(bad("maturity_ts"));
+        }
+        // Issue #1 M4: the circuit requires open_ts <= batch_ts at open time;
+        // batch_ts is assigned at build (>= now), so cap the client's clock
+        // skew here. A signed far-future open_ts would strand as unprovable.
+        if position.open_ts > db::now() as u64 + OPEN_TS_SKEW_SECS {
+            return Err(bad("open_ts"));
+        }
+        // Issue #1 L7: bound the signed terms so interest arithmetic can
+        // never leave u64/u128 range for any realistic horizon (rate <= 1e6
+        // bps keeps cash*rate*elapsed < 2^128 for elapsed < 136 years).
+        if position.rate_bps > MAX_TERM_BPS || position.haircut_bps > MAX_TERM_BPS {
+            return Err(bad("terms_bps"));
         }
         if position.borrower_pk_x == position.lender_pk_x {
             return Err(bad("counterparty"));
@@ -974,7 +1002,11 @@ impl Engine {
                         deposits = deposits.len(),
                         "batch built"
                     );
-                    return Ok(Some(BatchJob { batch_num, prover_toml }));
+                    return Ok(Some(BatchJob {
+                        batch_num,
+                        new_root: witness.new_state_root,
+                        prover_toml,
+                    }));
                 }
                 Err(RepoBuildError::Payments(BuildError::TreeFull))
                 | Err(RepoBuildError::Payments(BuildError::BalanceOverflow { .. }))
@@ -1032,19 +1064,37 @@ impl Engine {
                         | BadSignature { open_index, .. }
                         | ZeroAmount { open_index }
                         | BadTerms { open_index }
+                        | FutureOpenTs { open_index }
                         | Undercollateralized { open_index }
                         | PositionsFull { open_index }
                         | ReservedPaddingPk { open_index } => open_index,
                     };
                     let evicted = open_rows.remove(idx);
-                    tracing::warn!(id = evicted.id, ?err, "rejecting queued open");
-                    db::opens_set_status(
-                        &self.conn,
-                        &[evicted.id],
-                        "rejected",
-                        None,
-                        Some(&format!("{err:?}")),
-                    )?;
+                    // Issue #1 M4: an open_ts slightly ahead of batch_ts
+                    // (client clock skew inside the admission window)
+                    // becomes provable once the batch clock catches up —
+                    // leave it 'pending' for a later batch instead of
+                    // rejecting. Anything further out was tampered past
+                    // admission; reject it like the rest.
+                    if matches!(err, FutureOpenTs { .. })
+                        && evicted.open_ts <= batch_ts + 2 * OPEN_TS_SKEW_SECS
+                    {
+                        tracing::info!(
+                            id = evicted.id,
+                            open_ts = evicted.open_ts,
+                            batch_ts,
+                            "open_ts ahead of batch clock; deferring open to a later batch"
+                        );
+                    } else {
+                        tracing::warn!(id = evicted.id, ?err, "rejecting queued open");
+                        db::opens_set_status(
+                            &self.conn,
+                            &[evicted.id],
+                            "rejected",
+                            None,
+                            Some(&format!("{err:?}")),
+                        )?;
+                    }
                     if txs.is_empty() && deposits.is_empty() && open_rows.is_empty() {
                         return Ok(None);
                     }
@@ -1272,6 +1322,18 @@ impl Engine {
         )?;
         tx.execute(
             "UPDATE deposits SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
+            [batch_num as i64],
+        )?;
+        // Closes and liqs too (issue #1 H3): rows stuck in 'batching' are
+        // invisible to closes_pending/liqs_pending, and insert_liq is
+        // INSERT OR IGNORE keyed by slot — a stranded default/liquidation
+        // could never be re-enqueued, freezing that position's collateral.
+        tx.execute(
+            "UPDATE closes SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
+            [batch_num as i64],
+        )?;
+        tx.execute(
+            "UPDATE liqs SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
             [batch_num as i64],
         )?;
         // Delete (not mark failed): the rebuild reuses this batch_num, and
@@ -1519,7 +1581,9 @@ fn settle_index(err: &SettleError) -> usize {
         | NotPastMaturity { index }
         | MarginHealthy { index }
         | InsufficientCash { index, .. }
-        | BalanceOverflow { index } => *index,
+        | BalanceOverflow { index }
+        | FutureOpenTs { index }
+        | InterestOverflow { index } => *index,
     }
 }
 
@@ -1645,6 +1709,17 @@ pub fn load_and_reconcile(
             .map_err(|e| e.to_string())?;
             tx.execute(
                 "UPDATE deposits SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
+                [batch.batch_num as i64],
+            )
+            .map_err(|e| e.to_string())?;
+            // Closes and liqs too (issue #1 H3, mirroring fail_batch).
+            tx.execute(
+                "UPDATE closes SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
+                [batch.batch_num as i64],
+            )
+            .map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE liqs SET status = 'pending', batch_num = NULL WHERE batch_num = ?1 AND status = 'batching'",
                 [batch.batch_num as i64],
             )
             .map_err(|e| e.to_string())?;
@@ -2172,6 +2247,38 @@ mod engine_tests {
         // The rebuild reuses batch_num 1 and must succeed.
         let rebuilt = e.try_build_batch(250_000_000).unwrap().expect("rebuild after failure");
         assert_eq!(rebuilt.batch_num, 1);
+    }
+
+    /// Regression (issue #1 H3): fail_batch must requeue closes and liqs
+    /// alongside mempool/opens/deposits. A default/liquidation stuck in
+    /// 'batching' can never be re-enqueued (insert_liq is INSERT OR IGNORE
+    /// keyed by slot), permanently freezing the position's collateral.
+    #[test]
+    fn fail_batch_requeues_closes_and_liqs() {
+        let mut e = engine(2, 4, 0);
+        let close = db::CloseRow {
+            id: 0,
+            pos_index: 3,
+            borrower_pk_x: fr_from_u64(11),
+            borrower_pk_y: fr_from_u64(12),
+            borrower_nonce: 0,
+            sig: [fr_from_u64(1), fr_from_u64(2), fr_from_u64(3), fr_from_u64(4)],
+        };
+        let close_id = db::insert_close(&e.conn, &close).unwrap();
+        assert!(db::insert_liq(&e.conn, 7, false).unwrap());
+        db::closes_set_status(&e.conn, &[close_id], "batching", Some(1), None).unwrap();
+        db::liqs_set_status(&e.conn, &[7], "batching", Some(1), None).unwrap();
+        assert_eq!(db::closes_count_pending(&e.conn).unwrap(), 0);
+        assert!(db::liqs_pending(&e.conn, 8).unwrap().is_empty());
+        // Stuck in 'batching', the watcher cannot re-enqueue the same slot.
+        assert!(!db::insert_liq(&e.conn, 7, false).unwrap());
+
+        e.fail_batch(1, "prove failed").unwrap();
+
+        assert_eq!(db::closes_count_pending(&e.conn).unwrap(), 1, "close requeued");
+        let liqs = db::liqs_pending(&e.conn, 8).unwrap();
+        assert_eq!(liqs.len(), 1, "liq requeued");
+        assert_eq!(liqs[0].pos_index, 7);
     }
 
     #[test]
