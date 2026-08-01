@@ -14,20 +14,61 @@ use std::sync::{mpsc, Arc};
 use std::time::Duration;
 use tokio::sync::oneshot;
 
+/// A proof binds its claimed batch_ts, and the contract only accepts
+/// claimed >= ledger - 60s. Once an inflight batch's ts lags further than
+/// this, resubmission can NEVER land it — fail + requeue is the only way
+/// forward. 90s = the 60s window plus submission/ledger slack.
+const TS_WINDOW_LAPSED_SECS: u64 = 90;
+
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub async fn run(
     engine: mpsc::Sender<Command>,
     client: Arc<dyn StellarClient>,
     cfg: Config,
 ) {
     // Resume any batch left mid-pipeline by a crash before the normal loop.
-    if let Some((batch_num, status)) = inflight(&engine).await {
+    if let Some((batch_num, status, batch_ts)) = inflight(&engine).await {
         tracing::info!(batch_num, %status, "resuming inflight batch on boot");
-        resume(&engine, &client, &cfg, batch_num, &status).await;
+        resume(&engine, &client, &cfg, batch_num, &status, batch_ts).await;
     }
 
     let mut interval = tokio::time::interval(Duration::from_secs(cfg.tick_secs));
     loop {
         interval.tick().await;
+
+        // Self-heal a wedged inflight batch (e.g. submission kept failing
+        // until its timestamp window lapsed): confirm it if it actually
+        // landed, otherwise fail + requeue so a fresh batch can build.
+        if let Some((batch_num, status, batch_ts)) = inflight(&engine).await {
+            if matches!(status.as_str(), "proved" | "submitting" | "submitted")
+                && now_secs().saturating_sub(batch_ts) > TS_WINDOW_LAPSED_SECS
+            {
+                let c = client.clone();
+                let landed = tokio::task::spawn_blocking(move || c.batch_num())
+                    .await
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .map(|bn| bn >= batch_num)
+                    .unwrap_or(false);
+                if landed {
+                    let _ = ask(&engine, |r| Command::ConfirmBatch(batch_num, r)).await;
+                } else {
+                    tracing::warn!(
+                        batch_num,
+                        batch_ts,
+                        "inflight batch's timestamp window lapsed; rebuilding"
+                    );
+                    fail(&engine, batch_num, "timestamp window lapsed").await;
+                }
+            }
+        }
+
         // Fetch the oracle price for this tick: the 7th public input must be
         // exactly what the contract will read at submission.
         let c = client.clone();
@@ -183,10 +224,30 @@ async fn resume(
     cfg: &Config,
     batch_num: u64,
     status: &str,
+    batch_ts: u64,
 ) {
     match status {
         // Proof exists; re-submitting is safe (proof binds old_root, a
         // double-land fails verification) — go straight to submit+confirm.
+        // EXCEPT when the proof's timestamp window has lapsed: it can never
+        // land, so check whether it already did and otherwise rebuild.
+        "proved" | "submitting" | "submitted"
+            if now_secs().saturating_sub(batch_ts) > TS_WINDOW_LAPSED_SECS =>
+        {
+            let c = client.clone();
+            let landed = tokio::task::spawn_blocking(move || c.batch_num())
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .map(|bn| bn >= batch_num)
+                .unwrap_or(false);
+            if landed {
+                let _ = ask(engine, |r| Command::ConfirmBatch(batch_num, r)).await;
+            } else {
+                tracing::warn!(batch_num, batch_ts, "resume: timestamp window lapsed; rebuilding");
+                fail(engine, batch_num, "timestamp window lapsed").await;
+            }
+        }
         "proved" | "submitting" | "submitted" => {
             let envelope = match ask(engine, |r| Command::MarkSubmitting(batch_num, r)).await {
                 Ok(env) => env,
@@ -208,7 +269,7 @@ async fn resume(
 
 // ---- engine command helpers ----
 
-async fn inflight(engine: &mpsc::Sender<Command>) -> Option<(u64, String)> {
+async fn inflight(engine: &mpsc::Sender<Command>) -> Option<(u64, String, u64)> {
     let (tx, rx) = oneshot::channel();
     engine.send(Command::GetInflight(tx)).ok()?;
     rx.await.ok().flatten()

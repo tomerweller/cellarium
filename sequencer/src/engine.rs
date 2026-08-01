@@ -203,8 +203,8 @@ pub enum Command {
     ConfirmBatch(u64, oneshot::Sender<Result<(), ApiError>>),
     /// Batch failed pre-submission; requeue its inputs.
     FailBatch(u64, String, oneshot::Sender<Result<(), ApiError>>),
-    /// Resume state for the batcher after boot.
-    GetInflight(oneshot::Sender<Option<(u64, String)>>),
+    /// Resume state for the batcher after boot: (batch_num, status, batch_ts).
+    GetInflight(oneshot::Sender<Option<(u64, String, u64)>>),
 }
 
 pub struct Engine {
@@ -292,7 +292,7 @@ impl Engine {
                 let inflight = db::inflight_batch(&self.conn)
                     .ok()
                     .flatten()
-                    .map(|b| (b.batch_num, b.status));
+                    .map(|b| (b.batch_num, b.status, b.batch_ts));
                 let _ = reply.send(inflight);
             }
         }
