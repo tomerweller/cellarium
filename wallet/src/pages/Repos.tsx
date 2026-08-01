@@ -17,7 +17,7 @@ import { interest } from '../crypto/repo';
 import { POLL_MS } from '../config';
 import { useKey } from '../keys/KeyContext';
 import { CopyableHex, ErrorText } from '../components/common';
-import { formatTs, isCanonicalPkX, shortHex, stroopsToXlm } from '../format';
+import { formatTs, isCanonicalPkX, parseScaled, shortHex, stroopsToXlm } from '../format';
 import { Onboarding } from './Onboarding';
 
 const TUST_PER_UNIT = 10_000_000n;
@@ -45,12 +45,12 @@ export function Repos() {
 
 function Desk({ pkX, sk }: { pkX: string; sk: bigint }) {
   const qc = useQueryClient();
-  const { data: positions } = useQuery({
+  const positionsQuery = useQuery({
     queryKey: ['positions', pkX],
     queryFn: () => api.positions(pkX),
     refetchInterval: POLL_MS,
   });
-  const { data: intents } = useQuery({
+  const intentsQuery = useQuery({
     queryKey: ['intents', pkX],
     // Signed read-auth (issue #1 L12): listings require proof of key control.
     queryFn: () => listIntents(sk),
@@ -61,12 +61,39 @@ function Desk({ pkX, sk }: { pkX: string; sk: bigint }) {
     qc.invalidateQueries({ queryKey: ['intents'] });
     qc.invalidateQueries({ queryKey: ['account'] });
   };
+  const queryError = positionsQuery.error ?? intentsQuery.error;
 
   return (
     <div className="stack">
-      <PositionList pkX={pkX} sk={sk} positions={positions?.positions ?? []} onChange={refresh} />
-      <IncomingIntents sk={sk} intents={intents?.incoming ?? []} onChange={refresh} />
-      <OutgoingIntents intents={intents?.outgoing ?? []} />
+      {/* A failed refresh is an outage, not an absence of positions/intents
+          (issue #30): keep last-known data visible, marked stale. */}
+      {queryError && (
+        <section className="panel" role="alert">
+          <ErrorText error={queryError} />
+          <p className="muted">
+            {positionsQuery.data || intentsQuery.data
+              ? 'Showing the last loaded repo state; it may be stale.'
+              : 'Repo state could not be loaded.'}
+          </p>
+          <button
+            className="btn-inline"
+            onClick={() => {
+              positionsQuery.refetch();
+              intentsQuery.refetch();
+            }}
+          >
+            Retry
+          </button>
+        </section>
+      )}
+      <PositionList
+        pkX={pkX}
+        sk={sk}
+        positions={positionsQuery.data?.positions ?? []}
+        onChange={refresh}
+      />
+      <IncomingIntents sk={sk} intents={intentsQuery.data?.incoming ?? []} onChange={refresh} />
+      <OutgoingIntents intents={intentsQuery.data?.outgoing ?? []} />
       <NewIntentForm sk={sk} onCreated={refresh} />
     </div>
   );
@@ -235,15 +262,30 @@ function NewIntentForm({ sk, onCreated }: { sk: bigint; onCreated: () => void })
   const [error, setError] = useState<unknown>(null);
   const [ok, setOk] = useState<string | null>(null);
 
-  const valid =
-    isCanonicalPkX(counterparty) &&
-    Number(cash) > 0 &&
-    Number(coll) > 0 &&
-    Number(rate) >= 0 &&
-    Number(haircut) >= 0 &&
-    Number(termHours) > 0;
+  // Exact integer terms (issue #27): parsed from the decimal strings with
+  // no float round-trip. null = not yet valid.
+  function parsedTerms() {
+    try {
+      const cashStroops = parseScaled(cash, 7, 'Cash');
+      const collBase = parseScaled(coll, 7, 'Collateral');
+      const rateBps = parseScaled(rate, 2, 'Rate');
+      const haircutBps = parseScaled(haircut, 2, 'Haircut');
+      // Hundredths of an hour × 36 = exact seconds.
+      const termSecs = parseScaled(termHours, 2, 'Term') * 36n;
+      if (cashStroops <= 0n || collBase <= 0n || termSecs <= 0n) return null;
+      if (cashStroops >= 1n << 64n || collBase >= 1n << 64n) return null;
+      if (haircutBps > 10_000n || rateBps > 1_000_000n) return null;
+      if (termSecs > BigInt(Number.MAX_SAFE_INTEGER)) return null;
+      return { cashStroops, collBase, rateBps, haircutBps, termSecs };
+    } catch {
+      return null;
+    }
+  }
+  const terms = parsedTerms();
+  const valid = isCanonicalPkX(counterparty) && terms !== null;
 
   async function submit() {
+    if (!terms) return;
     setBusy(true);
     setError(null);
     setOk(null);
@@ -251,11 +293,11 @@ function NewIntentForm({ sk, onCreated }: { sk: bigint; onCreated: () => void })
       const res = await createIntent(sk, {
         role,
         counterpartyPkX: counterparty.trim(),
-        cash: BigInt(Math.round(Number(cash) * 1e7)),
-        coll: BigInt(Math.round(Number(coll) * 1e7)),
-        rateBps: Math.round(Number(rate) * 100),
-        haircutBps: Math.round(Number(haircut) * 100),
-        termSecs: Math.round(Number(termHours) * 3600),
+        cash: terms.cashStroops,
+        coll: terms.collBase,
+        rateBps: Number(terms.rateBps),
+        haircutBps: Number(terms.haircutBps),
+        termSecs: Number(terms.termSecs),
       });
       setOk(`Intent #${res.id} posted — waiting for the counterparty to countersign.`);
       setCounterparty('');
@@ -307,6 +349,13 @@ function NewIntentForm({ sk, onCreated }: { sk: bigint; onCreated: () => void })
         Term (hours)
         <input value={termHours} onChange={(e) => setTermHours(e.target.value)} />
       </label>
+      {terms && (
+        <p className="muted">
+          Signing exact terms: {terms.cashStroops.toString()} stroops cash ·{' '}
+          {terms.collBase.toString()} tUST base units · {terms.rateBps.toString()} bps rate ·{' '}
+          {terms.haircutBps.toString()} bps haircut · {terms.termSecs.toString()} s term
+        </p>
+      )}
       <button disabled={!valid || busy} onClick={submit}>
         Sign &amp; post intent
       </button>

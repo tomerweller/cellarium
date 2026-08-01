@@ -1,23 +1,14 @@
 import { useNavigate } from 'react-router-dom';
+import { entryView } from '../activity';
 import { useAccount, useHistory, usePending } from '../api/queries';
 import { useKey } from '../keys/KeyContext';
 import { hexToFr } from '../crypto/fields';
 import { leafValue, verifyPath } from '../crypto/merkle';
+import { p2 } from '../crypto/poseidon2';
 import { stroopsToXlm } from '../format';
 import { CopyableHex, ErrorText, StatusBadge } from '../components/common';
 import { VerifiedSeal } from '../components/VerifiedSeal';
 import { Onboarding } from './Onboarding';
-
-const KIND_LABEL: Record<string, string> = {
-  deposit: 'Deposit',
-  transfer_in: 'Received',
-  transfer_out: 'Sent',
-  withdraw: 'Withdrawal',
-  repo_open: 'Repo opened',
-  repo_close: 'Repo closed',
-  repo_default: 'Repo defaulted',
-  repo_liquidation: 'Repo liquidated',
-};
 
 export function Home() {
   const { wallet } = useKey();
@@ -59,8 +50,13 @@ export function Home() {
       </div>
     );
   } else {
+    // Inclusion (issue #21): the siblings prove the leaf into the ACCOUNT
+    // root; the advertised state root is the combined
+    // P2(account_root, position_root), so both links must hold.
     const leaf = leafValue(hexToFr(account.pk_x), BigInt(account.cash), BigInt(account.coll), BigInt(account.nonce));
-    const included = verifyPath(leaf, account.index, account.siblings.map(hexToFr), hexToFr(account.root));
+    const inAccountTree = verifyPath(leaf, account.index, account.siblings.map(hexToFr), hexToFr(account.account_root));
+    const combined = p2([hexToFr(account.account_root), hexToFr(account.position_root)]);
+    const included = inAccountTree && combined === hexToFr(account.root);
     hero = (
       <div className="hero">
         <div className="eyebrow">
@@ -89,21 +85,23 @@ export function Home() {
           {recent.length > 0 && <a className="btn-inline" onClick={() => navigate('/activity')}>View all</a>}
         </div>
         {recent.length === 0 && <p className="muted" style={{ marginTop: '0.75rem' }}>No activity yet.</p>}
-        {recent.map((e) => (
-          <div className="list-row" key={`${e.status}-${e.id}`}>
-            <div className="who">
-              <span className="kind">{KIND_LABEL[e.kind] ?? e.kind}</span>
-              {e.counterparty && <span className="cp"><CopyableHex value={e.counterparty} chars={5} /></span>}
+        {recent.map((e) => {
+          const v = entryView(e);
+          return (
+            <div className="list-row" key={`${e.status}-${e.id}`}>
+              <div className="who">
+                <span className="kind">{v.label}</span>
+                {e.counterparty && <span className="cp"><CopyableHex value={e.counterparty} chars={5} /></span>}
+              </div>
+              <div className="row" style={{ gap: '0.6rem' }}>
+                <span className={v.sign === '−' ? 'amt-out' : 'amt-in'}>
+                  {v.sign}{v.amount} {v.unit}
+                </span>
+                <StatusBadge status={e.status} />
+              </div>
             </div>
-            <div className="row" style={{ gap: '0.6rem' }}>
-              <span className={e.kind === 'transfer_in' || e.kind === 'deposit' ? 'amt-in' : 'amt-out'}>
-                {e.kind === 'transfer_in' || e.kind === 'deposit' ? '+' : '−'}
-                {stroopsToXlm(BigInt(e.amount))}
-              </span>
-              <StatusBadge status={e.status} />
-            </div>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </>
   );

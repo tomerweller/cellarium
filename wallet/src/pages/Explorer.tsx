@@ -3,12 +3,12 @@ import { useParams, useStatus, useBatches } from '../api/queries';
 import { readOnchainRoot } from '../api/stellar';
 import { SEQUENCER_URL, contractUrl } from '../config';
 import { formatTs } from '../format';
-import { Badge, CopyableHex } from '../components/common';
+import { Badge, CopyableHex, ErrorText } from '../components/common';
 
 export function Explorer() {
   const { data: params } = useParams();
-  const { data: status } = useStatus();
-  const { data: batchesData } = useBatches();
+  const { data: status, error: statusError, refetch: refetchStatus } = useStatus();
+  const { data: batchesData, error: batchesError, refetch: refetchBatches } = useBatches();
   const [chainRoot, setChainRoot] = useState<string | null | undefined>(undefined);
 
   useEffect(() => {
@@ -30,6 +30,26 @@ export function Explorer() {
       <p className="muted" style={{ marginTop: '-0.4rem' }}>
         The validity proof: the sequencer's state root, checked against the contract on-chain.
       </p>
+      {/* A failed poll is an outage, not an empty rollup (issue #30). */}
+      {(statusError ?? batchesError) != null && (
+        <div role="alert">
+          <ErrorText error={statusError ?? batchesError} />
+          <p className="muted">
+            {status || batchesData
+              ? 'Showing the last loaded explorer state; it may be stale.'
+              : 'Explorer state could not be loaded.'}
+          </p>
+          <button
+            className="btn-inline"
+            onClick={() => {
+              refetchStatus();
+              refetchBatches();
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      )}
       {status && (
         <>
           <div className="kv"><span className="k">Batch</span><span className="dots" /><span className="v">#{status.batch_num}</span></div>

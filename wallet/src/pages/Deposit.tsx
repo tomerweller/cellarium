@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useParams } from '../api/queries';
 import { useKey } from '../keys/KeyContext';
-import { awaitTx, connectFreighter, deposit, friendbotUrl, isFunded } from '../api/stellar';
+import { awaitTx, connectFreighter, deposit, friendbotUrl, fundingStatus } from '../api/stellar';
 import * as pendingDeposits from '../keys/pendingDeposits';
 import { xlmToStroops } from '../format';
 import { ErrorText, Stepper } from '../components/common';
@@ -36,10 +36,18 @@ export function Deposit() {
       setStep(0);
       const addr = await connectFreighter(params);
       setGAddr(addr);
-      if (!(await isFunded(params, addr))) {
+      // Friendbot is offered only for the RPC's definitive account-missing
+      // answer; a transport failure is an error, not "unfunded" (issue #29).
+      const funding = await fundingStatus(params, addr);
+      if (funding === 'unfunded') {
         setNeedsFunding(true);
         setStep(-1);
         return;
+      }
+      if (funding === 'unknown') {
+        throw new Error(
+          'Could not check your Stellar account (RPC unreachable). Nothing was submitted — try again.',
+        );
       }
       setStep(1);
       const hash = await deposit(params, addr, wallet.pkX, asset, stroops);

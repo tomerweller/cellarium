@@ -144,7 +144,14 @@ pub struct AccountInfo {
     pub pending_nonce: u64,
     pub pending_out_cash: String,
     pub pending_out_coll: String,
+    /// Combined state root: P2(account_root, position_root).
     pub root: String,
+    /// Root of the account tree alone — what `siblings` proves into.
+    pub account_root: String,
+    /// Root of the position tree; P2(account_root, position_root) must
+    /// equal `root` (issue #21: the wallet needs both to re-derive the
+    /// combined root from the inclusion path).
+    pub position_root: String,
     pub batch_num: u64,
     pub siblings: Vec<String>,
 }
@@ -427,6 +434,8 @@ impl Engine {
             pending_out_cash: pending_out_cash.to_string(),
             pending_out_coll: pending_out_coll.to_string(),
             root: fr_hex(&self.state.state_root(&hasher)),
+            account_root: fr_hex(&self.state.accounts.root(&hasher)),
+            position_root: fr_hex(&self.state.positions.root(&hasher)),
             batch_num: self.confirmed_batch_num(),
             siblings: siblings.iter().map(fr_hex).collect(),
         })
@@ -1570,7 +1579,7 @@ impl Engine {
                 &tx,
                 &p.borrower_pk_x,
                 batch_num,
-                "repo_close",
+                "repo_close_borrower",
                 Some(&fr_hex(&p.lender_pk_x)),
                 0,
                 p.cash + centry.interest,
@@ -1580,7 +1589,7 @@ impl Engine {
                 &tx,
                 &p.lender_pk_x,
                 batch_num,
-                "repo_close",
+                "repo_close_lender",
                 Some(&fr_hex(&p.borrower_pk_x)),
                 0,
                 p.cash + centry.interest,
@@ -1605,7 +1614,7 @@ impl Engine {
                 &tx,
                 &p.borrower_pk_x,
                 batch_num,
-                kind,
+                &format!("{kind}_borrower"),
                 Some(&fr_hex(&p.lender_pk_x)),
                 1,
                 p.coll,
@@ -1615,7 +1624,7 @@ impl Engine {
                 &tx,
                 &p.lender_pk_x,
                 batch_num,
-                kind,
+                &format!("{kind}_lender"),
                 Some(&fr_hex(&p.borrower_pk_x)),
                 1,
                 p.coll,
@@ -1635,7 +1644,7 @@ impl Engine {
                 &tx,
                 &p.borrower_pk_x,
                 batch_num,
-                "repo_open",
+                "repo_open_borrower",
                 Some(&fr_hex(&p.lender_pk_x)),
                 0,
                 p.cash,
@@ -1645,7 +1654,7 @@ impl Engine {
                 &tx,
                 &p.lender_pk_x,
                 batch_num,
-                "repo_open",
+                "repo_open_lender",
                 Some(&fr_hex(&p.borrower_pk_x)),
                 0,
                 p.cash,

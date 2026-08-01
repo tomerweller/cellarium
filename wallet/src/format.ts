@@ -37,6 +37,24 @@ export function xlmToStroops(s: string): bigint {
   return v;
 }
 
+/**
+ * Parse a plain decimal string into an integer scaled by 10^decimals,
+ * exactly (issue #27): no Number round-trip, so excess precision, scientific
+ * notation, signs, and values beyond 2^53 are rejected instead of silently
+ * rounded before the user signs them.
+ */
+export function parseScaled(s: string, decimals: number, what: string): bigint {
+  const t = s.trim();
+  if (!/^\d+(\.\d+)?$/.test(t)) {
+    throw new Error(`${what}: enter a plain positive decimal number`);
+  }
+  const [whole, frac = ''] = t.split('.');
+  if (frac.length > decimals) {
+    throw new Error(`${what}: at most ${decimals} decimal place${decimals === 1 ? '' : 's'}`);
+  }
+  return BigInt(whole) * 10n ** BigInt(decimals) + BigInt(frac.padEnd(decimals, '0') || '0');
+}
+
 /** Abbreviate a long hex string for display: 0x1234…abcd. */
 export function shortHex(hex: string, n = 6): string {
   if (hex.length <= 2 + n * 2) return hex;

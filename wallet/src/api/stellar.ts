@@ -87,13 +87,22 @@ export async function connectFreighter(params: Params): Promise<string> {
   return access.address;
 }
 
-/** True if the account exists/funded; false → show a friendbot link. */
-export async function isFunded(params: Params, address: string): Promise<boolean> {
+export type FundingStatus = 'funded' | 'unfunded' | 'unknown';
+
+/**
+ * Whether the L1 account exists. Only the RPC's definitive account-missing
+ * answer returns 'unfunded' (→ friendbot); DNS/CSP/rate-limit/outage
+ * failures return 'unknown' so a funded user is never sent down the
+ * friendbot path by a transport error (issue #29).
+ */
+export async function fundingStatus(params: Params, address: string): Promise<FundingStatus> {
   try {
     await server(params).getAccount(address);
-    return true;
-  } catch {
-    return false;
+    return 'funded';
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (/account not found/i.test(msg)) return 'unfunded';
+    return 'unknown';
   }
 }
 

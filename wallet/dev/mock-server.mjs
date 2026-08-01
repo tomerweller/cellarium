@@ -33,7 +33,7 @@ function level0() {
   for (let i = 0; i < 1 << DEPTH; i++) out.push(leafValue(leaves.get(i)));
   return out;
 }
-function root() {
+function accountRoot() {
   let lvl = level0();
   while (lvl.length > 1) {
     const next = [];
@@ -41,6 +41,21 @@ function root() {
     lvl = next;
   }
   return lvl[0];
+}
+// Empty depth-8 position tree (all-zero leaves), hashed once at boot. The
+// mock never proves position leaves; it only has to keep the combined-root
+// algebra honest: root = P2(account_root, position_root) (issue #21).
+const POSITION_ROOT = (() => {
+  let lvl = new Array(1 << DEPTH).fill(0n);
+  while (lvl.length > 1) {
+    const next = [];
+    for (let i = 0; i < lvl.length; i += 2) next.push(p2([lvl[i], lvl[i + 1]]));
+    lvl = next;
+  }
+  return lvl[0];
+})();
+function root() {
+  return p2([accountRoot(), POSITION_ROOT]);
 }
 function path(index) {
   let lvl = level0();
@@ -108,7 +123,9 @@ const server = createServer(async (req, res) => {
       pk_x: pkXHex, index: idx, cash: a.cash.toString(), coll: a.coll.toString(),
       nonce: Number(a.nonce), pending_nonce: Number(a.nonce),
       pending_out_cash: '0', pending_out_coll: '0',
-      root: toHex(root()), batch_num: batchNum, siblings: path(idx).map(toHex),
+      root: toHex(root()), account_root: toHex(accountRoot()),
+      position_root: toHex(POSITION_ROOT),
+      batch_num: batchNum, siblings: path(idx).map(toHex),
     });
   }
   if (parts[0] === 'history')

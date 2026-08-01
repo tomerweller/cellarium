@@ -22,7 +22,12 @@ export interface AccountInfo {
   pending_nonce: number;
   pending_out_cash: string;
   pending_out_coll: string;
+  /** Combined state root: P2(account_root, position_root). */
   root: string;
+  /** Account-tree root — what `siblings` proves the leaf into. */
+  account_root: string;
+  /** Position-tree root; P2(account_root, position_root) must equal `root`. */
+  position_root: string;
   batch_num: number;
   siblings: string[];
 }
@@ -41,7 +46,8 @@ export interface Status {
 export interface HistoryEntry {
   id: number;
   batch_num: number | null;
-  kind: 'deposit' | 'transfer_in' | 'transfer_out' | 'withdraw' | 'repo_open';
+  /** e.g. deposit, transfer_in/out, withdraw, repo_open_borrower, … (see activity.ts). */
+  kind: string;
   counterparty: string | null;
   asset: number;
   amount: string;
