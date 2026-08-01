@@ -13,6 +13,10 @@ const KIND_LABEL: Record<string, string> = {
   transfer_in: 'Received',
   transfer_out: 'Sent',
   withdraw: 'Withdrawal',
+  repo_open: 'Repo opened',
+  repo_close: 'Repo closed',
+  repo_default: 'Repo defaulted',
+  repo_liquidation: 'Repo liquidated',
 };
 
 export function Home() {
@@ -63,6 +67,11 @@ export function Home() {
           Balance{pending.total > 0 && <span className="pill" style={{ marginLeft: '0.6rem' }}>{pending.total} settling</span>}
         </div>
         <div className="amount">{stroopsToXlm(BigInt(account.cash))} <small>XLM</small></div>
+        {BigInt(account.coll) > 0n && (
+          <div className="amount" style={{ fontSize: '1.1rem' }}>
+            {(Number(account.coll) / 1e7).toLocaleString()} <small>tUST</small>
+          </div>
+        )}
         <VerifiedSeal verified={included} root={account.root} batch={account.batch_num} />
       </div>
     );

@@ -17,6 +17,7 @@ export function Deposit() {
   const navigate = useNavigate();
   const qc = useQueryClient();
   const [amount, setAmount] = useState('');
+  const [asset, setAsset] = useState<0 | 1>(0);
   const [step, setStep] = useState<number>(-1); // -1 idle; 0..3 active; 4 done
   const [gAddr, setGAddr] = useState<string | null>(null);
   const [needsFunding, setNeedsFunding] = useState(false);
@@ -41,7 +42,7 @@ export function Deposit() {
         return;
       }
       setStep(1);
-      const hash = await deposit(params, addr, wallet.pkX, 0, stroops);
+      const hash = await deposit(params, addr, wallet.pkX, asset, stroops);
       setStep(2);
       const outcome = await awaitTx(params, hash);
       if (outcome === 'failed') {
@@ -70,10 +71,18 @@ export function Deposit() {
       <a className="back" onClick={() => navigate('/')}>← Wallet</a>
       <h2>Deposit</h2>
       <p className="muted">
-        Move XLM from your Stellar account (via Freighter) into the rollup. It credits your L2
-        account when the next batch settles — usually within seconds.
+        Move XLM or tUST from your Stellar account (via Freighter) into the rollup. It credits
+        your L2 account when the next batch settles — usually within seconds.
+        {asset === 1 && ' (Your Stellar account needs tUST first — ask the operator to mint some: scripts/mint_tust.sh.)'}
       </p>
-      <label>Amount (XLM)</label>
+      <label>
+        Asset{' '}
+        <select value={asset} onChange={(e) => setAsset(Number(e.target.value) as 0 | 1)} disabled={busy}>
+          <option value={0}>XLM (cash)</option>
+          <option value={1}>tUST (collateral)</option>
+        </select>
+      </label>
+      <label>Amount ({asset === 0 ? 'XLM' : 'tUST'})</label>
       <input
         placeholder="0.0"
         value={amount}

@@ -6,6 +6,7 @@ import { Banner } from './common';
 
 const tabs = [
   ['/', 'Wallet'],
+  ['/repos', 'Repos'],
   ['/activity', 'Activity'],
   ['/explorer', 'Explorer'],
   ['/learn', 'Learn'],

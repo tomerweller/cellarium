@@ -57,6 +57,62 @@ export interface WireSig {
   s_hi: string;
 }
 
+export interface Intent {
+  id: number;
+  initiator: 'borrower' | 'lender';
+  borrower_pk_x: string;
+  borrower_pk_y: string;
+  lender_pk_x: string;
+  lender_pk_y: string;
+  cash: string;
+  coll: string;
+  rate_bps: number;
+  haircut_bps: number;
+  open_ts: number;
+  maturity_ts: number;
+  borrower_nonce: number;
+  lender_nonce: number;
+  status: string;
+  created_at: number;
+}
+
+export interface Position {
+  slot: number;
+  borrower_pk_x: string;
+  lender_pk_x: string;
+  cash: string;
+  coll: string;
+  rate_bps: number;
+  haircut_bps: number;
+  open_ts: number;
+  maturity_ts: number;
+}
+
+export interface IntentRequest {
+  initiator: 'borrower' | 'lender';
+  borrower_pk_x: string;
+  borrower_pk_y: string;
+  lender_pk_x: string;
+  lender_pk_y: string;
+  cash: string;
+  coll: string;
+  rate_bps: number;
+  haircut_bps: number;
+  open_ts: number;
+  maturity_ts: number;
+  borrower_nonce: number;
+  lender_nonce: number;
+  sig: WireSig;
+}
+
+export interface CloseRequest {
+  pos_index: number;
+  borrower_pk_x: string;
+  borrower_pk_y: string;
+  nonce: number;
+  sig: WireSig;
+}
+
 export interface TxRequest {
   from_pk_x: string;
   from_pk_y: string;
@@ -116,6 +172,26 @@ export const api = {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(tx),
+    }),
+  intents: (pkX: string) => req<{ incoming: Intent[]; outgoing: Intent[] }>(`/intents/${pkX}`),
+  positions: (pkX: string) => req<{ positions: Position[] }>(`/positions/${pkX}`),
+  submitIntent: (intent: IntentRequest) =>
+    req<{ id: number; status: string }>('/intent', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(intent),
+    }),
+  acceptIntent: (id: number, sig: WireSig) =>
+    req<{ id: number; status: string }>(`/intent/${id}/accept`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sig }),
+    }),
+  close: (close: CloseRequest) =>
+    req<{ id: number; status: string }>('/close', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(close),
     }),
 };
 

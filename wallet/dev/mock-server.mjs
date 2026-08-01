@@ -20,6 +20,10 @@ const fromHex = (s) => BigInt(s);
 const leaves = new Map();
 let batchNum = 0;
 const history = new Map(); // pkXHex -> entries[]
+const intents = new Map(); // id -> intent
+const posSlots = new Map(); // slot -> position
+let nextIntentId = 1;
+let nextSlot = 0;
 
 function leafValue(a) {
   return a ? p2([DOMAIN_LEAF, a.pkX, p2([a.cash, a.coll]), a.nonce]) : 0n;
@@ -68,6 +72,16 @@ const server = createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const parts = url.pathname.split('/').filter(Boolean);
 
+  // CORS preflight (the wallet dev server runs on another origin).
+  if (req.method === 'OPTIONS') {
+    res.writeHead(204, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    });
+    return res.end();
+  }
+
   if (parts[0] === 'healthz') return json(res, 200, 'ok');
   if (parts[0] === 'params')
     return json(res, 200, {
@@ -101,6 +115,74 @@ const server = createServer(async (req, res) => {
     return json(res, 200, { entries: history.get(parts[1]) ?? [] });
   if (parts[0] === 'batches') return json(res, 200, { batches: [] });
 
+  if (parts[0] === 'positions') {
+    const pk = parts[1];
+    const mine = [...posSlots.entries()]
+      .filter(([, p]) => p.borrower_pk_x === pk || p.lender_pk_x === pk)
+      .map(([slot, p]) => ({ slot, ...p }));
+    return json(res, 200, { positions: mine });
+  }
+  if (parts[0] === 'intents') {
+    const pk = parts[1];
+    const all = [...intents.values()].filter((i) => i.status === 'open');
+    const incoming = all.filter((i) =>
+      i.initiator === 'borrower' ? i.lender_pk_x === pk : i.borrower_pk_x === pk,
+    );
+    const outgoing = all.filter((i) =>
+      i.initiator === 'borrower' ? i.borrower_pk_x === pk : i.lender_pk_x === pk,
+    );
+    return json(res, 200, { incoming, outgoing });
+  }
+  if (parts[0] === 'intent' && req.method === 'POST' && parts.length === 1) {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const intent = { ...JSON.parse(body), id: nextIntentId++, status: 'open', created_at: Math.floor(Date.now() / 1000) };
+    intents.set(intent.id, intent);
+    return json(res, 200, { id: intent.id, status: 'open' });
+  }
+  if (parts[0] === 'intent' && parts[2] === 'accept' && req.method === 'POST') {
+    const intent = intents.get(Number(parts[1]));
+    if (!intent) return json(res, 404, { error: { code: 'NOT_FOUND', message: 'no such intent' } });
+    intent.status = 'accepted';
+    // Mock settles instantly: move balances and open the position.
+    const bIdx = findOrSeed(intent.borrower_pk_x);
+    const lIdx = findOrSeed(intent.lender_pk_x);
+    const b = leaves.get(bIdx);
+    const l = leaves.get(lIdx);
+    const cash = BigInt(intent.cash);
+    const coll = BigInt(intent.coll);
+    l.cash -= cash; l.nonce += 1n;
+    b.cash += cash; b.coll -= coll; b.nonce += 1n;
+    const slot = nextSlot++;
+    posSlots.set(slot, {
+      borrower_pk_x: intent.borrower_pk_x,
+      lender_pk_x: intent.lender_pk_x,
+      cash: intent.cash, coll: intent.coll,
+      rate_bps: intent.rate_bps, haircut_bps: intent.haircut_bps,
+      open_ts: intent.open_ts, maturity_ts: intent.maturity_ts,
+    });
+    batchNum += 1;
+    return json(res, 200, { id: slot, status: 'pending' });
+  }
+  if (parts[0] === 'close' && req.method === 'POST') {
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const c = JSON.parse(body);
+    const p = posSlots.get(c.pos_index);
+    if (!p) return json(res, 404, { error: { code: 'NOT_FOUND', message: 'no such position' } });
+    const bIdx = findOrSeed(p.borrower_pk_x);
+    const lIdx = findOrSeed(p.lender_pk_x);
+    const b = leaves.get(bIdx);
+    const l = leaves.get(lIdx);
+    const cash = BigInt(p.cash);
+    const elapsed = BigInt(Math.max(0, Math.floor(Date.now() / 1000) - p.open_ts));
+    const interest = (cash * BigInt(p.rate_bps) * elapsed) / 311040000000n;
+    b.cash -= cash + interest; b.coll += BigInt(p.coll); b.nonce += 1n;
+    l.cash += cash + interest;
+    posSlots.delete(c.pos_index);
+    batchNum += 1;
+    return json(res, 200, { id: c.pos_index, status: 'pending' });
+  }
   if (parts[0] === 'tx' && req.method === 'POST') {
     let body = '';
     for await (const chunk of req) body += chunk;

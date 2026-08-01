@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "wallet-mock",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "node dev/mock-server.mjs & VITE_SEQUENCER_URL=http://localhost:8787 npx vite --port 5173"],
+      "cwd": "wallet",
+      "port": 5173
+    }
+  ]
+}

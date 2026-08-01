@@ -15,6 +15,7 @@ export function Send() {
   const qc = useQueryClient();
   const [to, setTo] = useState('');
   const [amount, setAmount] = useState('');
+  const [asset, setAsset] = useState<0 | 1>(0);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<unknown>(null);
@@ -24,7 +25,12 @@ export function Send() {
 
   const kind = classifyRecipient(to);
   const isWithdraw = kind === 'stellar';
-  const available = account ? BigInt(account.cash) - BigInt(account.pending_out_cash) : 0n;
+  const available = account
+    ? asset === 0
+      ? BigInt(account.cash) - BigInt(account.pending_out_cash)
+      : BigInt(account.coll) - BigInt(account.pending_out_coll)
+    : 0n;
+  const unit = asset === 0 ? 'XLM' : 'tUST';
 
   const validRecipient = kind === 'l2' || kind === 'stellar';
   let amountStroops: bigint | null = null;
@@ -45,7 +51,7 @@ export function Send() {
       const res = await signAndSubmit({
         sk: wallet.sk,
         to: to.trim(),
-        asset: 0n, // cash (XLM); the repo desk (M5) adds tUST flows
+        asset: BigInt(asset),
         amount: amountStroops,
         nonce: BigInt(account.pending_nonce),
         isWithdraw,
@@ -75,7 +81,7 @@ export function Send() {
         <a className="back" onClick={() => setConfirming(false)}>← back</a>
         <h2>Confirm withdrawal</h2>
         <p>
-          Withdraw <strong>{stroopsToXlm(amountStroops)} XLM</strong> to the Stellar address{' '}
+          Withdraw <strong>{stroopsToXlm(amountStroops)} {unit}</strong> to the Stellar address{' '}
           <CopyableHex value={to.trim()} chars={8} />.
         </p>
         <p className="muted">
@@ -103,7 +109,14 @@ export function Send() {
       {kind === 'invalid' && <p className="error">Not a rollup account or Stellar address.</p>}
 
       <div className="field-row">
-        <label>Amount (XLM)</label>
+        <label>
+          Asset{' '}
+          <select value={asset} onChange={(e) => setAsset(Number(e.target.value) as 0 | 1)}>
+            <option value={0}>XLM (cash)</option>
+            <option value={1}>tUST (collateral)</option>
+          </select>
+        </label>
+        <label>Amount ({unit})</label>
         {account && (
           <button
             className="btn-inline"

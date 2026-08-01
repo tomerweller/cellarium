@@ -9,6 +9,7 @@ import { Send } from './pages/Send';
 import { Receive } from './pages/Receive';
 import { Deposit } from './pages/Deposit';
 import { Activity } from './pages/Activity';
+import { Repos } from './pages/Repos';
 import { Explorer } from './pages/Explorer';
 import './styles.css';
 
@@ -29,6 +30,7 @@ const router = createBrowserRouter(
         { path: 'deposit', element: <Deposit /> },
         { path: 'receive', element: <Receive /> },
         // Primary destinations.
+        { path: 'repos', element: <Repos /> },
         { path: 'activity', element: <Activity /> },
         { path: 'explorer', element: <Explorer /> },
         {

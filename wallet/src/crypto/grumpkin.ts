@@ -1,6 +1,7 @@
 // Grumpkin: y^2 = x^3 - 17 over the BN254 scalar field, cofactor 1.
 // Generator pinned identically to circuits/lib/src/schnorr.nr GEN and
 // ark-grumpkin's Affine::generator().
+import { Field } from '@noble/curves/abstract/modular.js';
 import { weierstrass } from '@noble/curves/abstract/weierstrass.js';
 import { N_GRUMPKIN, P_BN254_FR } from './fields';
 // N_GRUMPKIN used by canonicalizeSk
@@ -45,4 +46,19 @@ export function pointFromAffine(x: bigint, y: bigint) {
   const p = Grumpkin.fromAffine({ x, y });
   p.assertValidity();
   return p;
+}
+
+const Fp = Field(P_BN254_FR);
+
+/**
+ * Recover the canonical even-y public key from its x-coordinate. Every
+ * active spend key on the rollup is even-y canonical (circuit-enforced), so
+ * knowing a counterparty's pk_x is enough to reconstruct their full point.
+ * Throws if x is not on the curve.
+ */
+export function evenYFromX(x: bigint): AffinePoint {
+  const y2 = Fp.add(Fp.mul(Fp.mul(x, x), x), P_BN254_FR - 17n);
+  const y = Fp.sqrt(y2); // throws if no root (x not on curve)
+  const even = (y & 1n) === 0n ? y : P_BN254_FR - y;
+  return { x, y: even };
 }
