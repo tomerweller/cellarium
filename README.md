@@ -12,8 +12,16 @@ sizes, rates, counterparties — lives off-chain inside a Noir circuit.
 Each batch of activity settles on Stellar testnet as **one UltraHonk proof**;
 only escrow totals, state roots, and commitments touch the chain.
 
-> Research prototype on **testnet only**. Not audited; see [Trust model &
-> limitations](#trust-model--limitations).
+> ## ⚠️ Proof of concept — not production-grade software
+>
+> This is a research experiment on **Stellar testnet only**. It has not been
+> audited, it holds no real value, and it must not be used to custody real
+> funds. Known, deliberate gaps include: no forced exits (the operator can
+> freeze funds), no key-custody hardening in the wallet, no off-machine
+> backups, and public plaintext DA. See [Trust model &
+> limitations](#trust-model--limitations) and the
+> [open issues](https://github.com/tomerweller/cellarium/issues) for the full
+> list.
 
 ## What a repo looks like here
 
