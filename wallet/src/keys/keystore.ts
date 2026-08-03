@@ -1,7 +1,14 @@
 // L2 key custody. Spike-grade: the secret lives in localStorage (documented
 // XSS caveat). A key is a Grumpkin scalar; the account id is pk_x.
-import { frToHex32, hexToFr, randScalar } from '../crypto/fields';
-import { pkFromSk } from '../crypto/grumpkin';
+//
+// Every path that persists a key MUST canonicalize it to even-y form first:
+// the circuit (is_even_y on active spends) and the sequencer (pk_from_coords)
+// reject odd-y keys, so a non-canonical sk can receive deposits (which bind
+// only pk_x) but can never sign a send, withdrawal, intent, or close.
+// Canonicalizing is loss-free: negating sk flips pk_y only; pk_x — the
+// account id — is unchanged.
+import { frToHex32, hexToFr, randScalar, scalarToHex32 } from '../crypto/fields';
+import { canonicalizeSk, pkFromSk } from '../crypto/grumpkin';
 
 const STORAGE_KEY = 'cellarium.v1.sk';
 const LINK_KEY = 'cellarium.v1.linkedAddress';
@@ -24,7 +31,11 @@ export function load(): Wallet | null {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return null;
   try {
-    return fromSk(hexToFr(raw));
+    // Heal any stored non-canonical key (from generate/import before they
+    // canonicalized): same pk_x, signing-capable form.
+    const sk = canonicalizeSk(hexToFr(raw));
+    if (scalarToHex32(sk) !== raw.toLowerCase()) localStorage.setItem(STORAGE_KEY, scalarToHex32(sk));
+    return fromSk(sk);
   } catch {
     return null;
   }
@@ -32,14 +43,14 @@ export function load(): Wallet | null {
 
 /** Persist a Freighter-derived key plus the Stellar address it's bound to. */
 export function saveDerived(sk: bigint, linkedAddress: string): Wallet {
-  localStorage.setItem(STORAGE_KEY, frToHex32(sk));
+  localStorage.setItem(STORAGE_KEY, scalarToHex32(sk));
   localStorage.setItem(LINK_KEY, linkedAddress);
   return fromSk(sk);
 }
 
 export function generate(): Wallet {
-  const sk = randScalar();
-  localStorage.setItem(STORAGE_KEY, frToHex32(sk));
+  const sk = canonicalizeSk(randScalar());
+  localStorage.setItem(STORAGE_KEY, scalarToHex32(sk));
   localStorage.removeItem(LINK_KEY); // random/imported keys aren't wallet-bound
   return fromSk(sk);
 }
@@ -52,7 +63,8 @@ export function importSk(hex: string): Wallet {
     throw new Error('Not a valid secret key — expected 0x followed by exactly 64 hex characters.');
   }
   if (sk === 0n) throw new Error('Secret key must be nonzero.');
-  localStorage.setItem(STORAGE_KEY, frToHex32(sk));
+  sk = canonicalizeSk(sk);
+  localStorage.setItem(STORAGE_KEY, scalarToHex32(sk));
   localStorage.removeItem(LINK_KEY);
   return fromSk(sk);
 }

@@ -19,6 +19,19 @@ export function frToHex32(v: Fr): string {
   return '0x' + v.toString(16).padStart(64, '0');
 }
 
+/**
+ * Canonical 32-byte hex for a Grumpkin SCALAR (secret keys, signature
+ * scalars). Scalars live in [0, n) with n > the Fr modulus, so frToHex32's
+ * field bound is wrong for them: an even-y canonicalized secret can
+ * legitimately exceed the Fr modulus.
+ */
+export function scalarToHex32(v: bigint): string {
+  if (v < 0n || v >= N_GRUMPKIN) {
+    throw new Error(`scalarToHex32: value out of scalar range: ${v}`);
+  }
+  return '0x' + v.toString(16).padStart(64, '0');
+}
+
 /** Strict parse: requires '0x' + exactly 64 hex chars. */
 export function hexToFr(s: string): Fr {
   if (!/^0x[0-9a-fA-F]{64}$/.test(s)) {
