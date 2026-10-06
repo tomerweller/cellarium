@@ -74,7 +74,8 @@ impl Config {
             tick_secs: var_or("TICK_SECS", "5")
                 .parse()
                 .map_err(|_| "bad TICK_SECS")?,
-            trusted_proxy_header: Some(var_or("TRUSTED_PROXY_HEADER", "fly-client-ip"))
+            trusted_proxy_header: std::env::var("TRUSTED_PROXY_HEADER")
+                .ok()
                 .filter(|s| !s.is_empty()),
             cli_timeout_secs: var_or("CLI_TIMEOUT_SECS", "30")
                 .parse()

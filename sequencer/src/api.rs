@@ -75,9 +75,10 @@ impl RateLimiter {
 }
 
 /// Client identity for rate limiting: only the deployment's configured
-/// proxy header is trusted (Fly's edge strips/sets Fly-Client-IP; a bare
-/// X-Forwarded-For from a direct connection is trivially spoofable —
-/// issue #20). Otherwise fall back to the socket peer address.
+/// proxy header (TRUSTED_PROXY_HEADER, unset by default) is trusted — set it
+/// only behind an edge that strips/sets that header; a bare X-Forwarded-For
+/// from a direct connection is trivially spoofable (issue #20). Otherwise
+/// fall back to the socket peer address.
 fn client_key(req: &Request, trusted_header: Option<&str>) -> String {
     if let Some(name) = trusted_header {
         if let Some(v) = req.headers().get(name).and_then(|v| v.to_str().ok()) {

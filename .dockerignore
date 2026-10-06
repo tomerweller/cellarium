@@ -7,7 +7,7 @@ wallet/dist
 .git
 
 # Local secrets and bootstrap artifacts must never enter a build context
-# (Compose and `fly deploy --remote-only` upload the repo root). See issue #12.
+# (Compose and remote builders upload the repo root). See issue #12.
 .env
 .env.*
 *.env

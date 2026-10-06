@@ -1,8 +1,8 @@
 # Walkthrough: a repo from open to close
 
-This is a screenshot tour of the [hosted wallet](https://blob.tomerweller.com/cellarium/)
-driving one repurchase agreement through its complete lifecycle on the live
-testnet deployment: **fund → negotiate → open → accrue interest → close
+This is a screenshot tour of the hosted wallet driving one repurchase
+agreement through its complete lifecycle on the testnet deployment (both
+since retired — run your own with the README quick start): **fund → negotiate → open → accrue interest → close
 (repay) → withdraw**, with every state transition settled on Stellar testnet
 by an UltraHonk validity proof.
 
@@ -22,8 +22,8 @@ agree bilaterally on terms — the venue never sees an order book:
 | haircut | 2.00% |
 | term | 24 hours |
 
-Every screenshot below was captured live against
-`https://cellarium.fly.dev` (see [how this walkthrough was made](#how-this-walkthrough-was-made)).
+Every screenshot below was captured live against the hosted sequencer
+(see [how this walkthrough was made](#how-this-walkthrough-was-made)).
 
 ## Step 1 — Create a rollup account
 
@@ -182,8 +182,8 @@ lifecycle as this document from the command line.
 
 ## How this walkthrough was made
 
-The screenshots are real: a Playwright script drove the production wallet at
-`blob.tomerweller.com/cellarium` against the live sequencer at
+The screenshots are real: a Playwright script drove the then-hosted wallet at
+`blob.tomerweller.com/cellarium` against the then-live sequencer at
 `cellarium.fly.dev` (contract `CDI3WL…OSV6` on Stellar testnet), on
 2026-08-03. Two browser profiles played borrower and lender with generated
 throwaway keys. The only step a human does differently is signing: real users

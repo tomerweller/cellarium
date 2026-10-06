@@ -4,8 +4,8 @@
 # a circuit-changing merge must go through an explicit re-bootstrap
 # (scripts/bootstrap_testnet.sh), never an ordinary deploy.
 #
-# Usage: scripts/check_vk.sh [CONTRACT_ID [RPC_URL [NETWORK_PASSPHRASE]]]
-#   Defaults come from fly.toml ([env] CONTRACT_ID / RPC_URL / passphrase).
+# Usage: scripts/check_vk.sh CONTRACT_ID [RPC_URL [NETWORK_PASSPHRASE]]
+#   RPC_URL / passphrase default to Stellar testnet.
 #
 # Requires nargo + bb on PATH (same pinned versions as the Dockerfile) and,
 # for the on-chain comparison, the stellar CLI. If the live contract predates
@@ -16,9 +16,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 CIRCUIT="${CIRCUIT_PKG:-batch_repo}"
-CONTRACT_ID="${1:-$(sed -n 's/^ *CONTRACT_ID *= *"\(.*\)"/\1/p' fly.toml | head -1)}"
-RPC_URL="${2:-$(sed -n 's/^ *RPC_URL *= *"\(.*\)"/\1/p' fly.toml | head -1)}"
-PASSPHRASE="${3:-$(sed -n 's/^ *NETWORK_PASSPHRASE *= *"\(.*\)"/\1/p' fly.toml | head -1)}"
+CONTRACT_ID="${1:?usage: scripts/check_vk.sh CONTRACT_ID [RPC_URL [NETWORK_PASSPHRASE]]}"
+RPC_URL="${2:-https://soroban-testnet.stellar.org}"
+PASSPHRASE="${3:-Test SDF Network ; September 2015}"
 
 echo "==> compiling $CIRCUIT and exporting its verification key"
 ( cd circuits && nargo compile --package "$CIRCUIT" >/dev/null \
@@ -39,7 +39,7 @@ if CHAIN_HASH=$(stellar contract invoke --id "$CONTRACT_ID" \
   if [ "$CHAIN_HASH" != "$IMAGE_VK_HASH" ]; then
     echo "::error::VK MISMATCH: this image's $CIRCUIT VK does not match contract $CONTRACT_ID."
     echo "A circuit/VK change requires the re-bootstrap workflow (scripts/bootstrap_testnet.sh),"
-    echo "updating fly.toml identifiers, and an on-chain proof smoke test — not an ordinary deploy."
+    echo "updating the deployment's contract ids, and an on-chain proof smoke test — not an ordinary deploy."
     exit 1
   fi
   echo "OK: image VK matches the live contract."
