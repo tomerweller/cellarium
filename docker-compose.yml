@@ -2,7 +2,7 @@
 # testnet. Run scripts/bootstrap_testnet.sh first to deploy the contract and
 # write .env. (Alternatively set AUTO_BOOTSTRAP=1 on the sequencer service
 # and drop the CONTRACT_ID/TOKEN_ID/... vars: the entrypoint then deploys
-# and records its own instance on the volume, as the Fly deployment does.)
+# and records its own instance on the volume.)
 #
 # Apple Silicon note: the sequencer image is linux/amd64 (bb ships amd64-linux
 # only) and runs under emulation — give colima/Docker Desktop ≥4GB and enable

@@ -68,7 +68,8 @@ stale (>5 min) prices.
 Architecture overview: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 Design details: [`DESIGN.md`](DESIGN.md). Project plan and agreed refinements:
 [`PLAN.md`](PLAN.md). Screenshot tour of the wallet through a full repo
-lifecycle on the live deployment: [`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md).
+lifecycle on the (since retired) hosted testnet deployment:
+[`docs/WALKTHROUGH.md`](docs/WALKTHROUGH.md).
 
 ## Quick start (local, against testnet)
 
@@ -102,9 +103,8 @@ price-crash liquidation):
 scripts/demo.sh
 ```
 
-**Cloud deployment is self-healing:** pushing to `main` deploys the
-sequencer to Fly (`.github/workflows/fly.yml`) and the wallet to GitHub
-Pages. The sequencer container self-bootstraps
+**Container deployment can self-heal:** there is no hosted instance, but
+with `AUTO_BOOTSTRAP=1` the sequencer container self-bootstraps
 (`scripts/docker_entrypoint.sh`): on boot it fingerprints the baked
 circuit's VK + DB schema against the instance recorded on its volume, and
 on mismatch deploys fresh tUST/oracle/rollup contracts, archives the old

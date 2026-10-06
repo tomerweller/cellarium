@@ -5,7 +5,7 @@
 # change makes the deployed instance permanently unusable by a newer
 # sequencer (and a DB schema bump makes the on-volume SQLite unopenable by
 # design). Before this entrypoint, every such commit required a manual
-# re-bootstrap + fly.toml patch; a deploy without one left the machine
+# re-bootstrap + config patch; a deploy without one left the machine
 # crash-looping.
 #
 # Mechanism: the persistent volume carries `instance.env` — the deployed
